@@ -7,14 +7,15 @@ import pandas as pd
 from PIL import Image, ImageOps
 
 import matplotlib.pyplot as plt
-import sys
+import sys, time
 
 from copy import copy
 from rclpy.node import Node
 from scipy.signal import convolve2d
 from std_msgs.msg import Float32
 from sensor_msgs.msg import LaserScan
-from nav_msgs.msg import OccupancyGrid, Path
+from nav_msgs.msg import OccupancyGrid, Path, Odometry
+from visualization_msgs.msg import Marker, MarkerArray
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Pose, Twist, PointStamped
 
 
@@ -58,9 +59,6 @@ class Map():
 
         return im, map_df, [xmin,xmax,ymin,ymax]
 
-    '''
-        pretty sure this turns the map image into a 2D black and white array of viable space and obstacles
-    '''
     def __get_obstacle_map(self, map_im, map_df):
         img_array = np.reshape(list(self.map_im.getdata()),(self.map_im.size[1],self.map_im.size[0]))
         up_thresh = self.map_df.occupied_thresh[0]*255
@@ -198,10 +196,12 @@ class AStar():
         path.reverse()
         return path,dist
 class MapProcessor():
-    def __init__(self,name):
-        self.map = Map(name) # black and white array of obstacles and open space
+    def __init__(self,map_in):
+        map_in[map_in == -1] = 0
+        self.map = map_in # black and white array of obstacles and open space
         self.inf_map_img_array = np.zeros(self.map.image_array.shape) # zero array the size of the map
-        self.map_graph = Tree(name) # idk, make a tree?
+        self.map_graph = Tree("mapper") # idk, make a tree?
+
 
     def __modify_map_pixel(self,map_array,i,j,value,absolute):
         if( (i >= 0) and
@@ -324,8 +324,6 @@ class MapProcessor():
             path_array[tup] = 0.5
         return path_array
 
-
-
 class Task1(Node):
     """
     Environment mapping task.
@@ -337,34 +335,110 @@ class Task1(Node):
         self.map_sub = self.create_subscription(OccupancyGrid, '/map', self.map_cbk, 10)
         self.cmd_vel = self.create_publisher(Twist, '/cmd_vel', 10)
         self.scan_pub = self.create_subscription(LaserScan, '/scan', self.laser_cbk, 10)
+        self.frontier_pub = self.create_publisher(MarkerArray, '/frontier', 10)
+        self.path_pub = self.create_publisher(Path, 'global_plan', 10)
+        self.next_goal_pub = self.create_publisher(PointStamped, 'next_goal',  10)
+
+        self.create_subscription(PoseStamped, '/move_base_simple/goal', self.__goal_pose_cbk, 10)
+        self.create_subscription(Odometry, '/odom', self.__ttbot_pose_cbk, 10)
+        self.create_subscription(PointStamped, '/clicked_point', self.__clicked_cbk, 10)
+        self.target_pub = self.create_publisher(PointStamped, '/target_point', 10)
 
         self.avoid_limit = 0.4
         self.map, self.map_data = None, None
         self.laser = None
         self.min_dist = np.inf
 
-        self.flags = {'debug':False, 'avoiding': False, 'new map': False}
+        self.flags = {'debug':False, 'avoiding': False, 'new map': False, 'first map': False, 'recompute': True, 'start spin': True}
         self.targeted_frontier = []
+
+        self.path = None
+        self.goal_pose = None 
+        self.ttbot_pose = PoseStamped()
+        self.ttbot_pose.pose.position.x = 0.0
+        self.ttbot_pose.pose.position.y = 0.0
+        self.start_time = 0.0
+        self.path_idx = 0
+        self.max_speed = 0.1
+        self.max_omega = 0.2
+        self.odom_pose = copy(self.ttbot_pose.pose)
+        self.odom_pose.orientation.z = 0.0
+        self.odom_pose.orientation.w = 1.0
+        self.spin_cnt = 0
 
 
         self.forward = 0
         self.avoid_bounds = [10, 80, 10] # +- on forward, angled, sides
         self.front_blocked = False
 
+    def __clicked_cbk(self, data):
+        point_x = data.point.x
+        point_y = data.point.y
+
+        x1 = self.ttbot_pose.pose.position.x
+        x2 = data.point.x
+        y1 = self.ttbot_pose.pose.position.y
+        y2 = data.point.y
+        theta = (np.arctan2(y2-y1, x2-x1))
+
+        self.get_logger().info(f"{(point_y):.3f},{(point_x):.3f} a: {theta:.3f}, {2*np.arccos(self.ttbot_pose.pose.orientation.w)*np.sign(self.ttbot_pose.pose.orientation.z)}")
+
+    def __goal_pose_cbk(self, data):
+        """! Callback to catch the goal pose.
+        @param  data    PoseStamped object from RVIZ.
+        @return None.
+        """
+        self.goal_pose = data
+        self.get_logger().info(
+            'goal_pose: {:.4f}, {:.4f}'.format(self.goal_pose.pose.position.x, self.goal_pose.pose.position.y))
+
+    def __ttbot_pose_cbk(self, data):
+        """! Callback to catch the position of the vehicle.
+        @param  data    PoseWithCovarianceStamped object from amcl.
+        @return None.
+        """
+        self.ttbot_pose = data.pose
+        '''
+        self.get_logger().info(
+            'ttbot_pose: {:.4f}, {:.4f}, {:.4f}, {:.4f}\n'.format(
+                self.ttbot_pose.pose.position.x, self.ttbot_pose.pose.position.y,
+                self.ttbot_pose.pose.orientation.z, self.ttbot_pose.pose.orientation.w,
+                ))
+        '''
 
     def timer_cb(self):
         #self.get_logger().info('Task1 node is alive.', throttle_duration_sec=1)
         # Feel free to delete this line, and write your algorithm in this callback function
+        if not self.flags['first map']:
+            return
+        
+        if self.flags['start spin']:
+            self.spin_cnt += 1
+            command = Twist()
+            command.angular.z = 0.4
+            if self.spin_cnt == 160:
+                self.flags['start spin'] = False
+                command.angular.z = 0.0
+            self.cmd_vel.publish(command)
+            return
+        
+        if self.flags['new map']:
+            self.flags['new map'] = False 
+            if self.flags['debug']:
+                self.data_display()
+
+        if self.flags['recompute']:
+            self.frontier = self.get_frontier()
+            target_tuple = self.get_target_frontier()
+            self.get_logger().info(f"Target: {target_tuple[0]:.3f}, {target_tuple[1]:.3f}")
+            self.flags['recompute'] = False
+
+
         speed, heading = self.avoid(0.0, 0.0)
         command = Twist()
         command.linear.x = float(speed)
         command.angular.z = float(heading)
-        self.cmd_vel.publish(command)
-        if self.flags['new map']:
-            self.frontier = self.get_frontier()
-            self.flags['new map'] = False 
-            if self.flags['debug']:
-                self.data_display()
+        self.cmd_vel.publish(command)        
 
 
         # 0 start by spinning
@@ -376,13 +450,11 @@ class Task1(Node):
 
         #self.get_logger().info(f"s:{speed:.3f} | h:{heading:.3f}, {self.front_blocked}")
 
-
     def laser_cbk(self, data):
         self.laser = data.ranges
 
-    def get_target(self):
-
-        current_position = (0,0) # TODO!!
+    def get_target_frontier(self):
+        current_position = (self.odom_pose.position.x, self.odom_pose.position.y)
         
         dist_min = np.inf
         target = (0,0)
@@ -394,17 +466,26 @@ class Task1(Node):
                     dist_min = dist
                     target = (r,c)
 
-        self.targeted_frontier.append(target)
-        return target
+        target = self.node_to_map(target)
 
+        self.targeted_frontier.append(target)
+        target_point = PointStamped()  
+        target_point.point.x = float(target[0])
+        target_point.point.y = float(target[1])
+        target_point.point.z = 0.0
+        target_point.header.frame_id = 'map'
+        target_point.header.stamp.sec = 0
+        target_point.header.stamp.nanosec = 0
+        self.target_pub.publish(target_point)
+        return target
 
     def map_cbk(self, data):
         self.map_msg = data
-        self.flags['new map'] = True
+        self.flags['new map'], self.flags['first map'] = True, True
         self.get_logger().info("got new map")
         self.map = np.reshape(data.data, (data.info.height, data.info.width))
-        self.map_data = {'width': data.info.width, 'height': data.info.height, 'originX': data.info.origin.position.x, 'originY': data.info.origin.position.y}
-
+        #data = OccupancyGrid()
+        self.map_data = {'width': data.info.width, 'height': data.info.height, 'originX': data.info.origin.position.x, 'originY': data.info.origin.position.y, 'resolution': data.info.resolution}
 
     def data_display(self):
         show_map = self.map.copy()
@@ -428,10 +509,75 @@ class Task1(Node):
                 if 0 <= nr < rows and 0 <= nc < cols and unknown_mask[nr, nc] == 1:
                     frontier.append((r, c))
                     break
-
+        
+        marker_array = self.create_marker_array(frontier)
+        self.frontier_pub.publish(marker_array)
         return frontier
 
+    def create_marker_array(self, frontier):
+        array = MarkerArray()
+        id = 0
+        for f in frontier:
+            x, y = self.node_to_map(f)
+
+            m = Marker()
+            m.header.frame_id='map'
+            m.header.stamp = self.get_clock().now().to_msg()
+            m.type = m.CUBE
+            m.id = id
+            # m.action = m.ADD
+            m.pose.position.z = 0.01
+            m.pose.position.x = float(x)
+            m.pose.position.y = float(y)
+            m.color.r = 0.0
+            m.color.g = 0.5
+            m.color.b = 0.8
+            m.color.a = 1.0
+            m.scale.x = 0.05
+            m.scale.y = 0.05
+            m.scale.z = 0.01
+
+
+            id += 1
+            array.markers.append(m)
     
+        return array
+
+    def convert_node_to_pose(self, node):
+        pose = PoseStamped()
+        pose.header.stamp = self.get_clock().now().to_msg()
+        pose.header.frame_id = "map"
+
+        x, y = self.node_to_map(node)
+
+        pose.pose.position.y = y
+        pose.pose.position.x = x
+        
+        return pose
+    
+    def node_to_map(self, node):
+        if type(node) == Map_Node:
+            node = node.name
+        elif type(node) == str:
+            x, y = node.split(',')
+        elif type(node) == tuple and len(node) == 2:
+            y, x = node
+        else:
+            raise(ValueError("Invalide node data type"))
+        map_res = self.map_data['resolution']
+        map_origin_y = self.map_data['originY']
+        map_origin_x = self.map_data['originX']
+
+        x = float((x) * map_res) + map_origin_x
+        y = float((y) * map_res) + map_origin_y
+        return (x, y)
+    
+    def convert_to_node(self, pose_in):
+        pose_x = pose_in.pose.position.x
+        pose_y = pose_in.pose.position.y
+        pose_x = (pose_x - self.map_data['originX']) // self.map_data['resolution']
+        pose_y = (pose_y - self.map_data['originY']) // self.map_data['resolution']
+        return f"{int(pose_y)},{int(pose_x)}"
 
     def avoid(self, speed, heading):
         self.flags['avoiding'] = False
@@ -453,8 +599,6 @@ class Task1(Node):
         self.flags['avoiding'] = True
 
         return speed, heading
-        
-
 
     def old_avoid(self, x_vel, z_ang):
         speed = x_vel
@@ -515,6 +659,67 @@ class Task1(Node):
 
         self.min_dist = min_dist
         return x_vel, z_ang
+
+    def a_star_path_planner(self, start_pose, end_pose):
+        self.path = Path()
+        self.path.header.frame_id = "map"
+        self.get_logger().info(
+            'A* planner.\n> start: {},\n> end: {}'.format(start_pose.pose.position, end_pose.pose.position))
+        self.start_time = self.get_clock().now().nanoseconds*1e-9 #Do not edit this line (required for autograder)
+        self.path.header.stamp.sec=int(self.start_time)
+        self.path.header.stamp.nanosec=0
+        
+        # inflate map and create graph
+        mp = MapProcessor(self.map)       # initialize map processor with map files
+        kr = mp.circle_kernel(3)                    # 5 x 5 array of ones
+        mp.inflate_map(kr,True)                     # Inflate boundaries and make binary
+        mp.get_graph_from_map()                     # create nodes for each open pixel and connect adjacent nodes with edges and add to mp.map_graph
+
+        fig, ax = plt.subplots(dpi=100)
+        plt.imshow(mp.inf_map_img_array)
+        
+        # set start and end of map graph, compute A* and solve
+        mp.map_graph.root = self.convert_to_node(start_pose)                # starting point of graph
+        mp.map_graph.end = self.convert_to_node(end_pose)                   # end of graph
+        
+        self.get_logger().info(f"goal node: {self.convert_to_node(end_pose)}")
+
+        as_maze = AStar(mp.map_graph)                                   # initialize astar with map graph
+        self.get_logger().info('Solving A*')
+
+        try:
+            as_maze.solve(mp.map_graph.g[mp.map_graph.root], mp.map_graph.g[mp.map_graph.end])   # get dist and via lists
+        except KeyError:
+            print(f"mp.map_graph.g: {mp.map_graph.g}")
+            raise KeyError(mp.map_graph.end)
+
+        # reconstruct A* path
+        self.get_logger().info("Reconstructing path")
+        path_as,dist_as = as_maze.reconstruct_path(mp.map_graph.g[mp.map_graph.root],mp.map_graph.g[mp.map_graph.end])  # Get list of nodes in shortest path
+        self.get_logger().info("Converting to poses")
+        #self.make_pose_path(path_as, end_pose) # convert list of node tuples to poses
+        self.path.poses = [self.convert_node_to_pose(node) for node in path_as]
+
+        #self.path.poses.append(start_pose)
+        #self.path.poses.append(end_pose)
+        # Do not edit below (required for autograder)
+        self.astarTime = Float32()
+        self.astarTime.data = float(self.get_clock().now().nanoseconds*1e-9-self.start_time)
+        self.calc_time_pub.publish(self.astarTime)
+
+        path_arr_as = mp.draw_path(path_as)
+        ax.imshow(path_arr_as)
+        plt.xlabel("x")
+        plt.ylabel("y")
+        plt.show()
+        
+        '''
+        self.get_logger().info(f"Finished a_star_path_planner\nlength={len(self.path.poses)}\n\n (x,y)  Path: ")
+        for point in self.path.poses:
+            self.get_logger().info(f"({point.pose.position.x:.2f}, {point.pose.position.y:.2f})")
+        '''
+        self.path_pub.publish(self.path)
+        return self.path
 
 def main(args=None):
     rclpy.init(args=args)
