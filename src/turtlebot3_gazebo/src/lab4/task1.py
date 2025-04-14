@@ -199,9 +199,8 @@ class MapProcessor():
     def __init__(self,map_in):
         map_in[map_in == -1] = 0
         self.map = map_in # black and white array of obstacles and open space
-        self.inf_map_img_array = np.zeros(self.map.image_array.shape) # zero array the size of the map
+        self.inf_map_img_array = np.zeros(self.map.shape) # zero array the size of the map
         self.map_graph = Tree("mapper") # idk, make a tree?
-
 
     def __modify_map_pixel(self,map_array,i,j,value,absolute):
         if( (i >= 0) and
@@ -227,10 +226,10 @@ class MapProcessor():
     def inflate_map(self,kernel,absolute=True):
         # Perform an operation like dilation, such that the small wall found during the mapping process
         # are increased in size, thus forcing a safer path.
-        self.inf_map_img_array = np.zeros(self.map.image_array.shape) # make a new empty map same size as original
-        for i in range(self.map.image_array.shape[0]):
-            for j in range(self.map.image_array.shape[1]): # for each pixel
-                if self.map.image_array[i][j] == 0: # if pixel is 0 -> wall?
+        self.inf_map_img_array = np.zeros(self.map.shape) # make a new empty map same size as original
+        for i in range(self.map.shape[0]):
+            for j in range(self.map.shape[1]): # for each pixel
+                if self.map[i][j] == 0: # if pixel is 0 -> wall?
                     self.__inflate_obstacle(kernel,self.inf_map_img_array,i,j,absolute) # expand by kernel
         r = np.max(self.inf_map_img_array)-np.min(self.inf_map_img_array) # max pixel value - min pixel value in inflated map
         if r == 0:
@@ -240,15 +239,15 @@ class MapProcessor():
 
     def get_graph_from_map(self):
         # Create the nodes that will be part of the graph, considering only valid nodes or the free space
-        for i in range(self.map.image_array.shape[0]):
-            for j in range(self.map.image_array.shape[1]):
+        for i in range(self.map.shape[0]):
+            for j in range(self.map.shape[1]):
                 if self.inf_map_img_array[i][j] == 0:
                     node = Map_Node('%d,%d'%(i,j))
                     self.map_graph.add_node(node)
                     # add a node for each open pixel whose name is its position
         # Connect the nodes through edges (add children)
-        for i in range(self.map.image_array.shape[0]):
-            for j in range(self.map.image_array.shape[1]):
+        for i in range(self.map.shape[0]):
+            for j in range(self.map.shape[1]):
                 # for each newly created node
                 if self.inf_map_img_array[i][j] == 0:
                     if (i > 0):
@@ -256,7 +255,7 @@ class MapProcessor():
                             # add an edge up
                             child_up = self.map_graph.g['%d,%d'%(i-1,j)]
                             self.map_graph.g['%d,%d'%(i,j)].add_children([child_up],[1])
-                    if (i < (self.map.image_array.shape[0] - 1)):
+                    if (i < (self.map.shape[0] - 1)):
                         if self.inf_map_img_array[i+1][j] == 0:
                             # add an edge down
                             child_dw = self.map_graph.g['%d,%d'%(i+1,j)]
@@ -266,7 +265,7 @@ class MapProcessor():
                             # add an edge to the left
                             child_lf = self.map_graph.g['%d,%d'%(i,j-1)]
                             self.map_graph.g['%d,%d'%(i,j)].add_children([child_lf],[1])
-                    if (j < (self.map.image_array.shape[1] - 1)):
+                    if (j < (self.map.shape[1] - 1)):
                         if self.inf_map_img_array[i][j+1] == 0:
                             # add an edge to the right
                             child_rg = self.map_graph.g['%d,%d'%(i,j+1)]
@@ -276,17 +275,17 @@ class MapProcessor():
                             # add an edge up-left
                             child_up_lf = self.map_graph.g['%d,%d'%(i-1,j-1)]
                             self.map_graph.g['%d,%d'%(i,j)].add_children([child_up_lf],[np.sqrt(2)])
-                    if ((i > 0) and (j < (self.map.image_array.shape[1] - 1))):
+                    if ((i > 0) and (j < (self.map.shape[1] - 1))):
                         if self.inf_map_img_array[i-1][j+1] == 0:
                             # add an edge up-right
                             child_up_rg = self.map_graph.g['%d,%d'%(i-1,j+1)]
                             self.map_graph.g['%d,%d'%(i,j)].add_children([child_up_rg],[np.sqrt(2)])
-                    if ((i < (self.map.image_array.shape[0] - 1)) and (j > 0)):
+                    if ((i < (self.map.shape[0] - 1)) and (j > 0)):
                         if self.inf_map_img_array[i+1][j-1] == 0:
                             # add an edge down-left
                             child_dw_lf = self.map_graph.g['%d,%d'%(i+1,j-1)]
                             self.map_graph.g['%d,%d'%(i,j)].add_children([child_dw_lf],[np.sqrt(2)])
-                    if ((i < (self.map.image_array.shape[0] - 1)) and (j < (self.map.image_array.shape[1] - 1))):
+                    if ((i < (self.map.shape[0] - 1)) and (j < (self.map.shape[1] - 1))):
                         if self.inf_map_img_array[i+1][j+1] == 0:
                             # add an edge down-right
                             child_dw_rg = self.map_graph.g['%d,%d'%(i+1,j+1)]
@@ -375,13 +374,13 @@ class Task1(Node):
         point_x = data.point.x
         point_y = data.point.y
 
-        x1 = self.ttbot_pose.pose.position.x
+        x1 = self.ttbot_pose.position.x
         x2 = data.point.x
-        y1 = self.ttbot_pose.pose.position.y
+        y1 = self.ttbot_pose.position.y
         y2 = data.point.y
         theta = (np.arctan2(y2-y1, x2-x1))
 
-        self.get_logger().info(f"{(point_y):.3f},{(point_x):.3f} a: {theta:.3f}, {2*np.arccos(self.ttbot_pose.pose.orientation.w)*np.sign(self.ttbot_pose.pose.orientation.z)}")
+        self.get_logger().info(f"{(point_y):.3f},{(point_x):.3f} a: {theta:.3f}, {2*np.arccos(self.ttbot_pose.orientation.w)*np.sign(self.ttbot_pose.orientation.z)}")
 
     def __goal_pose_cbk(self, data):
         """! Callback to catch the goal pose.
@@ -397,7 +396,7 @@ class Task1(Node):
         @param  data    PoseWithCovarianceStamped object from amcl.
         @return None.
         """
-        self.ttbot_pose = data.pose
+        self.ttbot_pose = data.pose.pose
         '''
         self.get_logger().info(
             'ttbot_pose: {:.4f}, {:.4f}, {:.4f}, {:.4f}\n'.format(
@@ -416,7 +415,8 @@ class Task1(Node):
             self.spin_cnt += 1
             command = Twist()
             command.angular.z = 0.4
-            if self.spin_cnt == 160:
+            if self.spin_cnt == 60: # 160
+            # if self.spin_cnt == 2:
                 self.flags['start spin'] = False
                 command.angular.z = 0.0
             self.cmd_vel.publish(command)
@@ -431,8 +431,18 @@ class Task1(Node):
             self.frontier = self.get_frontier()
             target_tuple = self.get_target_frontier()
             self.get_logger().info(f"Target: {target_tuple[0]:.3f}, {target_tuple[1]:.3f}")
+            self.a_star_path_planner(self.ttbot_pose, target_tuple)
             self.flags['recompute'] = False
 
+
+        if self.flags['avoiding']:
+            self.flags['recompute'] = True
+
+        self.get_path_idx()
+        current_goal = self.path.poses[self.path_idx]  
+        speed, heading = self.path_follower(self.ttbot_pose, current_goal)
+        speed, heading = self.avoid(speed, heading)
+        self.move_ttbot(speed, heading)
 
         speed, heading = self.avoid(0.0, 0.0)
         command = Twist()
@@ -454,21 +464,21 @@ class Task1(Node):
         self.laser = data.ranges
 
     def get_target_frontier(self):
-        current_position = (self.odom_pose.position.x, self.odom_pose.position.y)
+        current_position = (self.ttbot_pose.position.x, self.ttbot_pose.position.y)
         
         dist_min = np.inf
         target = (0,0)
         for i in range(len(self.frontier)):
             r,c = self.frontier[i]
+            r,c = self.node_to_map((r, c))
             if (r, c) not in self.targeted_frontier:
                 dist = np.sqrt((current_position[0]-r)**2 + (current_position[1]-c)**2)
                 if dist < dist_min:
                     dist_min = dist
                     target = (r,c)
 
-        target = self.node_to_map(target)
-
         self.targeted_frontier.append(target)
+
         target_point = PointStamped()  
         target_point.point.x = float(target[0])
         target_point.point.y = float(target[1])
@@ -477,12 +487,19 @@ class Task1(Node):
         target_point.header.stamp.sec = 0
         target_point.header.stamp.nanosec = 0
         self.target_pub.publish(target_point)
+
+        ttbot = PointStamped()
+        ttbot.point.x = float(self.ttbot_pose.position.x)
+        ttbot.point.y = float(self.ttbot_pose.position.y)
+        ttbot.header.frame_id = 'map'
+        ttbot.header.stamp = self.get_clock().now().to_msg()
+        self.next_goal_pub.publish(ttbot)
+
         return target
 
     def map_cbk(self, data):
         self.map_msg = data
         self.flags['new map'], self.flags['first map'] = True, True
-        self.get_logger().info("got new map")
         self.map = np.reshape(data.data, (data.info.height, data.info.width))
         #data = OccupancyGrid()
         self.map_data = {'width': data.info.width, 'height': data.info.height, 'originX': data.info.origin.position.x, 'originY': data.info.origin.position.y, 'resolution': data.info.resolution}
@@ -509,7 +526,7 @@ class Task1(Node):
                 if 0 <= nr < rows and 0 <= nc < cols and unknown_mask[nr, nc] == 1:
                     frontier.append((r, c))
                     break
-        
+
         marker_array = self.create_marker_array(frontier)
         self.frontier_pub.publish(marker_array)
         return frontier
@@ -558,8 +575,8 @@ class Task1(Node):
     def node_to_map(self, node):
         if type(node) == Map_Node:
             node = node.name
-        elif type(node) == str:
-            x, y = node.split(',')
+            if type(node) == str:
+                y,x = node.split(',')
         elif type(node) == tuple and len(node) == 2:
             y, x = node
         else:
@@ -568,13 +585,17 @@ class Task1(Node):
         map_origin_y = self.map_data['originY']
         map_origin_x = self.map_data['originX']
 
-        x = float((x) * map_res) + map_origin_x
-        y = float((y) * map_res) + map_origin_y
+        x = float((x)) * map_res + map_origin_x
+        y = float((y)) * map_res + map_origin_y
         return (x, y)
     
     def convert_to_node(self, pose_in):
-        pose_x = pose_in.pose.position.x
-        pose_y = pose_in.pose.position.y
+        if type(pose_in) == tuple:
+            pose_x = pose_in[0]
+            pose_y = pose_in[1]
+        else:
+            pose_x = pose_in.position.x
+            pose_y = pose_in.position.y
         pose_x = (pose_x - self.map_data['originX']) // self.map_data['resolution']
         pose_y = (pose_y - self.map_data['originY']) // self.map_data['resolution']
         return f"{int(pose_y)},{int(pose_x)}"
@@ -664,7 +685,7 @@ class Task1(Node):
         self.path = Path()
         self.path.header.frame_id = "map"
         self.get_logger().info(
-            'A* planner.\n> start: {},\n> end: {}'.format(start_pose.pose.position, end_pose.pose.position))
+            'A* planner.\n> start: {},\n> end: {}'.format(start_pose, end_pose))
         self.start_time = self.get_clock().now().nanoseconds*1e-9 #Do not edit this line (required for autograder)
         self.path.header.stamp.sec=int(self.start_time)
         self.path.header.stamp.nanosec=0
@@ -697,15 +718,7 @@ class Task1(Node):
         self.get_logger().info("Reconstructing path")
         path_as,dist_as = as_maze.reconstruct_path(mp.map_graph.g[mp.map_graph.root],mp.map_graph.g[mp.map_graph.end])  # Get list of nodes in shortest path
         self.get_logger().info("Converting to poses")
-        #self.make_pose_path(path_as, end_pose) # convert list of node tuples to poses
         self.path.poses = [self.convert_node_to_pose(node) for node in path_as]
-
-        #self.path.poses.append(start_pose)
-        #self.path.poses.append(end_pose)
-        # Do not edit below (required for autograder)
-        self.astarTime = Float32()
-        self.astarTime.data = float(self.get_clock().now().nanoseconds*1e-9-self.start_time)
-        self.calc_time_pub.publish(self.astarTime)
 
         path_arr_as = mp.draw_path(path_as)
         ax.imshow(path_arr_as)
@@ -720,6 +733,105 @@ class Task1(Node):
         '''
         self.path_pub.publish(self.path)
         return self.path
+    
+    def get_path_idx(self):
+        """! Path follower.
+        @param  path                  Path object containing the sequence of waypoints of the created path.
+        @param  current_goal_pose     PoseStamped object containing the current vehicle position.
+        @return idx                   Position in the path pointing to the next goal pose to follow.
+        """
+        # find first dist(node) > 0.2m from current position
+        self.prev_idx = self.path_idx
+        idx = self.path_idx
+        dist = self.calc_pos_dist(self.path.poses[idx], self.ttbot_pose)
+        #print(f"dist: {dist}")
+        if self.at_end == 1 and dist < 0.05:
+            self.at_end = 2
+            self.get_logger().info("Goal reached")
+            return
+        while dist <= 0.1:
+            dist = self.calc_pos_dist(self.path.poses[idx], self.ttbot_pose)
+            idx += 1
+            if idx >= len(self.path.poses):
+                idx -= 1
+                self.at_end = 1
+                break
+        self.path_idx = idx
+        if not self.path_idx == self.prev_idx:
+            self.get_logger().info(f'{self.path_idx}: {self.path.poses[self.path_idx][0]:.3f}, {self.path.poses[self.path_idx][1]:.3f},') 
+            next_goal = PointStamped()
+            next_goal.point.x = self.path.poses[self.path_idx].pose.position.x
+            next_goal.point.y = self.path.poses[self.path_idx].pose.position.y
+            next_goal.point.z = 0.0
+            next_goal.header.frame_id = 'map'
+            next_goal.header.stamp.sec = 0
+            next_goal.header.stamp.nanosec = 0
+            self.next_goal_pub.publish(next_goal)
+
+    def path_follower(self, vehicle_pose, current_goal_pose):
+        """! Path follower.
+        @param  vehicle_pose           PoseStamped object containing the current vehicle pose.
+        @param  current_goal_pose      PoseStamped object containing the current target from the created path. This is different from the global target.
+        @return path                   Path object containing the sequence of waypoints of the created path.
+        """
+
+        # heading should point from vehicle posistion to goal position
+        # speed should be based on distance
+
+        if self.at_end == 2:
+            return 0,0
+
+        x1 = vehicle_pose.pose.position.x
+        x2 = current_goal_pose.pose.position.x
+        y1 = vehicle_pose.pose.position.y
+        y2 = current_goal_pose.pose.position.y
+        theta = np.arctan2(y2-y1, x2-x1)
+
+        # proportional speed control based on distance and heading, closer = slower, pointing wrong = slower
+        k_heading = -1
+        k_heading_dist = -.05
+        k_dist = .5
+
+        e_heading = np.sign(self.odom_pose.orientation.z)*2*np.arccos(self.odom_pose.orientation.w) - theta
+        if e_heading > 3.1415:
+            e_heading -= 6.283
+        if e_heading < -3.1415:
+            e_heading += 6.283
+        dist = self.calc_pos_dist(current_goal_pose.pose, self.odom_pose)
+
+        #if np.abs(e_heading) > 3.1415/2:
+        #    dist = -dist
+
+        #speed = min(max(dist * k_dist + e_heading * k_heading_dist, -self.max_speed), self.max_speed)
+        speed = min(max(dist * k_dist + e_heading * k_heading_dist, 0), self.max_speed)
+        
+        if np.abs(e_heading) > 3.1415/3:
+            speed = 0
+        if self.at_end == -1 and np.abs(e_heading) > 0.2:
+            speed = 0
+
+        heading = max(min(e_heading * k_heading, self.max_omega), -self.max_omega)  
+        return speed, heading
+
+    def move_ttbot(self, speed, heading):
+        """! Function to move turtlebot passing directly a heading angle and the speed.
+        @param  speed     Desired speed.
+        @param  heading   Desired yaw angle.
+        @return path      object containing the sequence of waypoints of the created path.
+        """
+
+        cmd_vel = Twist()
+        # TODO: IMPLEMENT YOUR LOW-LEVEL CONTROLLER
+        cmd_vel.linear.x = float(speed)
+        cmd_vel.angular.z = float(heading) # rad/s
+
+        self.cmd_vel_pub.publish(cmd_vel)
+
+    def calc_pos_dist(self, pose, cur_pose):
+        self.get_logger().info(f"{type(pose)} {type(cur_pose)}")
+        delta_x = (pose.pose.position.x - cur_pose.position.x)
+        delta_y = (pose.pose.position.y - cur_pose.position.y)
+        return np.sqrt(delta_x ** 2 + delta_y ** 2)
 
 def main(args=None):
     rclpy.init(args=args)
