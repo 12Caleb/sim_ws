@@ -197,7 +197,7 @@ class AStar():
         return path,dist
 class MapProcessor():
     def __init__(self,map_in):
-        map_in[map_in == -1] = 0
+        map_in[map_in == -1] = 50
         self.map = map_in # black and white array of obstacles and open space
         self.inf_map_img_array = np.zeros(self.map.shape) # zero array the size of the map
         self.map_graph = Tree("mapper") # idk, make a tree?
@@ -224,12 +224,14 @@ class MapProcessor():
                     self.__modify_map_pixel(map_array,k,l,kernel[k-i+dx][l-j+dy],absolute)
 
     def inflate_map(self,kernel,absolute=True):
+        #plt.imshow(self.map)
+        #plt.show()
         # Perform an operation like dilation, such that the small wall found during the mapping process
         # are increased in size, thus forcing a safer path.
-        self.inf_map_img_array = np.zeros(self.map.shape) # make a new empty map same size as original
+        # make a new empty map same size as original
         for i in range(self.map.shape[0]):
             for j in range(self.map.shape[1]): # for each pixel
-                if self.map[i][j] == 0: # if pixel is 0 -> wall?
+                if self.map[i][j] == 100: # if pixel is 0 -> wall?
                     self.__inflate_obstacle(kernel,self.inf_map_img_array,i,j,absolute) # expand by kernel
         r = np.max(self.inf_map_img_array)-np.min(self.inf_map_img_array) # max pixel value - min pixel value in inflated map
         if r == 0:
@@ -332,7 +334,7 @@ class Task1(Node):
         self.timer = self.create_timer(0.1, self.timer_cb)
         # Fill in the initialization member variables that you need
         self.map_sub = self.create_subscription(OccupancyGrid, '/map', self.map_cbk, 10)
-        self.cmd_vel = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.scan_pub = self.create_subscription(LaserScan, '/scan', self.laser_cbk, 10)
         self.frontier_pub = self.create_publisher(MarkerArray, '/frontier', 10)
         self.path_pub = self.create_publisher(Path, 'global_plan', 10)
@@ -343,27 +345,35 @@ class Task1(Node):
         self.create_subscription(PointStamped, '/clicked_point', self.__clicked_cbk, 10)
         self.target_pub = self.create_publisher(PointStamped, '/target_point', 10)
 
-        self.avoid_limit = 0.4
+        self.avoid_limit = 0.3
         self.map, self.map_data = None, None
         self.laser = None
         self.min_dist = np.inf
 
-        self.flags = {'debug':False, 'avoiding': False, 'new map': False, 'first map': False, 'recompute': True, 'start spin': True}
+        self.flags = {'debug': False,
+                      'avoiding': False,
+                      'new map': False,
+                      'first map': False,
+                      'recompute': True,
+                      'start spin': True,
+                      'follow path': True,
+                      'continue straight': False,
+                      'backup': False,
+                      }
         self.targeted_frontier = []
 
         self.path = None
-        self.goal_pose = None 
+        self.goal_pose = None
+        self.frontier = None
         self.ttbot_pose = PoseStamped()
         self.ttbot_pose.pose.position.x = 0.0
         self.ttbot_pose.pose.position.y = 0.0
         self.start_time = 0.0
         self.path_idx = 0
-        self.max_speed = 0.1
-        self.max_omega = 0.2
-        self.odom_pose = copy(self.ttbot_pose.pose)
-        self.odom_pose.orientation.z = 0.0
-        self.odom_pose.orientation.w = 1.0
-        self.spin_cnt = 0
+        self.max_speed = 0.2
+        self.max_omega = 0.6
+        self.cnt = 0
+        self.throttle = 0
 
 
         self.forward = 0
@@ -412,14 +422,15 @@ class Task1(Node):
             return
         
         if self.flags['start spin']:
-            self.spin_cnt += 1
+            self.cnt += 1
             command = Twist()
-            command.angular.z = 0.4
-            if self.spin_cnt == 60: # 160
+            command.angular.z = 0.6
+            if self.cnt == 100: # 160
             # if self.spin_cnt == 2:
                 self.flags['start spin'] = False
                 command.angular.z = 0.0
-            self.cmd_vel.publish(command)
+                self.cnt = 0
+            self.cmd_vel_pub.publish(command)
             return
         
         if self.flags['new map']:
@@ -428,28 +439,57 @@ class Task1(Node):
                 self.data_display()
 
         if self.flags['recompute']:
+            t=True
             self.frontier = self.get_frontier()
-            target_tuple = self.get_target_frontier()
-            self.get_logger().info(f"Target: {target_tuple[0]:.3f}, {target_tuple[1]:.3f}")
-            self.a_star_path_planner(self.ttbot_pose, target_tuple)
+            while t:
+                t = False
+                target_tuple = self.get_target_frontier()
+                time.sleep(2)
+                self.get_logger().info(f"Target: {target_tuple[0]:.3f}, {target_tuple[1]:.3f}")
+                try:
+                    self.a_star_path_planner(self.ttbot_pose, target_tuple)
+                except KeyError as e:
+                    self.get_logger().info(f"Key Error: {e}")
+                    t = True
             self.flags['recompute'] = False
+            self.flags['follow path'] = True
+            self.flags['orient'] = False
+            self.flags['continue straight'] = False
+            self.path_idx = 0
 
+        if not self.flags['continue straight']:
+            if self.flags['follow path']:
+                self.get_path_idx()
+                current_goal = self.path.poses[self.path_idx]  
+                speed, heading = self.path_follower(self.ttbot_pose, current_goal)
+            elif self.flags['orient']:
+                current_goal = self.path.poses[self.path_idx]  
+                speed, heading = self.path_follower(self.ttbot_pose, current_goal)
+            else:
+                speed, heading = 0.0, 0.0
+        else:
+            speed, heading = self.max_speed, 0.0
 
-        if self.flags['avoiding']:
-            self.flags['recompute'] = True
+        if self.flags['avoiding'] and self.flags['continue straight']:
+            self.flags['backup'] = True
+            self.flags['continue straight'] = False
 
-        self.get_path_idx()
-        current_goal = self.path.poses[self.path_idx]  
-        speed, heading = self.path_follower(self.ttbot_pose, current_goal)
+        if self.flags['backup']:
+            self.get_logger().info(f"Counter: {self.cnt}")
+            self.cnt += 1
+            if self.cnt < 10:
+                speed = -0.2
+                heading = 0
+            else:
+                self.flags['backup'] = False
+                self.flags['recompute'] = True
+                self.cnt = 0
+
         speed, heading = self.avoid(speed, heading)
+        if self.flags['backup']:
+            self.get_logger().info(f's:{speed:.3f}, h:{heading:.3f}')
         self.move_ttbot(speed, heading)
-
-        speed, heading = self.avoid(0.0, 0.0)
-        command = Twist()
-        command.linear.x = float(speed)
-        command.angular.z = float(heading)
-        self.cmd_vel.publish(command)        
-
+      
 
         # 0 start by spinning
         # 1 get frontier and target
@@ -467,7 +507,8 @@ class Task1(Node):
         current_position = (self.ttbot_pose.position.x, self.ttbot_pose.position.y)
         
         dist_min = np.inf
-        target = (0,0)
+        target = (np.inf, np.inf)
+        self.get_logger().info(f'Frontier is {len(self.frontier)} long')
         for i in range(len(self.frontier)):
             r,c = self.frontier[i]
             r,c = self.node_to_map((r, c))
@@ -506,9 +547,10 @@ class Task1(Node):
 
     def data_display(self):
         show_map = self.map.copy()
-        show_map[show_map == -1] = 200
-        for x, y in self.frontier:
-            show_map[x, y] = 150
+        show_map[show_map == -1] = 100
+        if self.frontier:
+            for x, y in self.frontier:
+                show_map[x, y] = 150
 
         plt.imshow(show_map)
         plt.show()
@@ -615,8 +657,9 @@ class Task1(Node):
         if min_dist > self.avoid_limit or 90 < min_idx < 270:
             return(speed, heading)
 
-        speed = 0
-        heading = np.sign(min_idx-180) * 0.2
+        self.get_logger().info(f'in avoid | s:{speed}, h:{heading}')
+        speed = min(0, speed) # allow it to back up
+        #heading = np.sign(min_idx-180) * 0.2
         self.flags['avoiding'] = True
 
         return speed, heading
@@ -684,20 +727,29 @@ class Task1(Node):
     def a_star_path_planner(self, start_pose, end_pose):
         self.path = Path()
         self.path.header.frame_id = "map"
-        self.get_logger().info(
-            'A* planner.\n> start: {},\n> end: {}'.format(start_pose, end_pose))
+       # self.get_logger().info(
+       #     'A* planner.\n> start: {},\n> end: {}'.format(start_pose, end_pose))
         self.start_time = self.get_clock().now().nanoseconds*1e-9 #Do not edit this line (required for autograder)
         self.path.header.stamp.sec=int(self.start_time)
         self.path.header.stamp.nanosec=0
         
         # inflate map and create graph
         mp = MapProcessor(self.map)       # initialize map processor with map files
-        kr = mp.circle_kernel(3)                    # 5 x 5 array of ones
+        
+
+        
+        kr = mp.circle_kernel(5)                    # 5 x 5 array of ones
         mp.inflate_map(kr,True)                     # Inflate boundaries and make binary
         mp.get_graph_from_map()                     # create nodes for each open pixel and connect adjacent nodes with edges and add to mp.map_graph
+        if mp.map_graph.g[end_pose] == 1:
+            self.get_logger().info(f'End Pose is in an inflate region: {end_pose}')
+            plt.imshow(mp.inf_map_img_array)
+            plt.show()
+            raise KeyError (end_pose)
 
         fig, ax = plt.subplots(dpi=100)
         plt.imshow(mp.inf_map_img_array)
+        plt.show()
         
         # set start and end of map graph, compute A* and solve
         mp.map_graph.root = self.convert_to_node(start_pose)                # starting point of graph
@@ -711,7 +763,7 @@ class Task1(Node):
         try:
             as_maze.solve(mp.map_graph.g[mp.map_graph.root], mp.map_graph.g[mp.map_graph.end])   # get dist and via lists
         except KeyError:
-            print(f"mp.map_graph.g: {mp.map_graph.g}")
+            #print(f"mp.map_graph.g: {mp.map_graph.g}")
             raise KeyError(mp.map_graph.end)
 
         # reconstruct A* path
@@ -724,7 +776,7 @@ class Task1(Node):
         ax.imshow(path_arr_as)
         plt.xlabel("x")
         plt.ylabel("y")
-        plt.show()
+        #plt.show()
         
         '''
         self.get_logger().info(f"Finished a_star_path_planner\nlength={len(self.path.poses)}\n\n (x,y)  Path: ")
@@ -745,20 +797,21 @@ class Task1(Node):
         idx = self.path_idx
         dist = self.calc_pos_dist(self.path.poses[idx], self.ttbot_pose)
         #print(f"dist: {dist}")
-        if self.at_end == 1 and dist < 0.05:
-            self.at_end = 2
+        if not self.flags['follow path'] and dist < 0.05:
+            self.flags['continue straight'] = True
             self.get_logger().info("Goal reached")
             return
-        while dist <= 0.1:
+        while dist <= 0.3:
             dist = self.calc_pos_dist(self.path.poses[idx], self.ttbot_pose)
             idx += 1
             if idx >= len(self.path.poses):
                 idx -= 1
-                self.at_end = 1
+                self.flags['follow path'] = False
+                self.flags['orient'] = True
+                self.flags['continue straight'] = True
                 break
         self.path_idx = idx
         if not self.path_idx == self.prev_idx:
-            self.get_logger().info(f'{self.path_idx}: {self.path.poses[self.path_idx][0]:.3f}, {self.path.poses[self.path_idx][1]:.3f},') 
             next_goal = PointStamped()
             next_goal.point.x = self.path.poses[self.path_idx].pose.position.x
             next_goal.point.y = self.path.poses[self.path_idx].pose.position.y
@@ -774,30 +827,37 @@ class Task1(Node):
         @param  current_goal_pose      PoseStamped object containing the current target from the created path. This is different from the global target.
         @return path                   Path object containing the sequence of waypoints of the created path.
         """
+        if type(vehicle_pose) == PoseStamped:
+            vehicle_pose = vehicle_pose.pose
+        if type(current_goal_pose) == PoseStamped:
+            current_goal_pose = current_goal_pose.pose
+        if type(self.ttbot_pose) == PoseStamped:
+            ttbot_pose = self.ttbot_pose.pose
+        else:
+            ttbot_pose = self.ttbot_pose
 
         # heading should point from vehicle posistion to goal position
         # speed should be based on distance
 
-        if self.at_end == 2:
-            return 0,0
-
-        x1 = vehicle_pose.pose.position.x
-        x2 = current_goal_pose.pose.position.x
-        y1 = vehicle_pose.pose.position.y
-        y2 = current_goal_pose.pose.position.y
+        x1 = vehicle_pose.position.x
+        x2 = current_goal_pose.position.x
+        y1 = vehicle_pose.position.y
+        y2 = current_goal_pose.position.y
         theta = np.arctan2(y2-y1, x2-x1)
 
         # proportional speed control based on distance and heading, closer = slower, pointing wrong = slower
-        k_heading = -1
+        k_heading = -1.2
         k_heading_dist = -.05
         k_dist = .5
 
-        e_heading = np.sign(self.odom_pose.orientation.z)*2*np.arccos(self.odom_pose.orientation.w) - theta
+
+
+        e_heading = np.sign(ttbot_pose.orientation.z)*2*np.arccos(ttbot_pose.orientation.w) - theta
         if e_heading > 3.1415:
             e_heading -= 6.283
         if e_heading < -3.1415:
             e_heading += 6.283
-        dist = self.calc_pos_dist(current_goal_pose.pose, self.odom_pose)
+        dist = self.calc_pos_dist(current_goal_pose, ttbot_pose)
 
         #if np.abs(e_heading) > 3.1415/2:
         #    dist = -dist
@@ -805,12 +865,21 @@ class Task1(Node):
         #speed = min(max(dist * k_dist + e_heading * k_heading_dist, -self.max_speed), self.max_speed)
         speed = min(max(dist * k_dist + e_heading * k_heading_dist, 0), self.max_speed)
         
-        if np.abs(e_heading) > 3.1415/3:
-            speed = 0
-        if self.at_end == -1 and np.abs(e_heading) > 0.2:
+        if np.abs(e_heading) > 3.1415/4:
             speed = 0
 
-        heading = max(min(e_heading * k_heading, self.max_omega), -self.max_omega)  
+        heading = max(min(e_heading * k_heading, self.max_omega), -self.max_omega) 
+
+        self.throttle += 1
+        if self.throttle % 6 == 0:
+            self.get_logger().info('E: {:.4f}, HE {:.4f}, S {:.4f}, H {:.4f}, fo:{}, con{}'.format(
+                dist, e_heading, speed, heading, self.flags['follow path'], self.flags['continue straight']
+            ))
+            self.throttle = 0
+        
+        if self.flags['orient']:
+            speed = 0.0
+
         return speed, heading
 
     def move_ttbot(self, speed, heading):
@@ -828,9 +897,13 @@ class Task1(Node):
         self.cmd_vel_pub.publish(cmd_vel)
 
     def calc_pos_dist(self, pose, cur_pose):
-        self.get_logger().info(f"{type(pose)} {type(cur_pose)}")
-        delta_x = (pose.pose.position.x - cur_pose.position.x)
-        delta_y = (pose.pose.position.y - cur_pose.position.y)
+        if type(pose) == PoseStamped:
+            pose = pose.pose
+        if type(cur_pose) == PoseStamped:
+            cur_pose = cur_pose.pose
+
+        delta_x = (pose.position.x - cur_pose.position.x)
+        delta_y = (pose.position.y - cur_pose.position.y)
         return np.sqrt(delta_x ** 2 + delta_y ** 2)
 
 def main(args=None):
