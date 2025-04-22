@@ -27,16 +27,17 @@ class Map():
         # configuration parameters
 
         cwd = os.getcwd()
-        map_name = os.path.join(cwd, 'src','task_4', map_name)
+        map_name = os.path.join(cwd, 'src', 'turtlebot3_gazebo', map_name)
         #map_name = os.path.join('ros_ws','src','task_4', map_name)
         #print(f"File name: {map_name}")
 
         f = open(map_name + '.yaml', 'r')
         map_df = pd.json_normalize(yaml.safe_load(f))
         # Open the map image
-        map_name = map_df.image[0]
+        map_name2 = map_df.image[0]
 
-        map_name = os.path.join(cwd, 'src','task_4', 'map', map_name)
+        map_name = os.path.join(cwd, 'src', 'turtlebot3_gazebo', 'maps', map_name2)
+        #map_name = os.path.join(cwd, 'src','task_4', 'map', map_name)
         #map_name = os.path.join('ros_ws','src','task_4', 'map', map_name)
 
         im = Image.open(map_name)
@@ -55,6 +56,8 @@ class Map():
         return im, map_df, [xmin,xmax,ymin,ymax]
 
     def __get_obstacle_map(self, map_im, map_df):
+        plt.imshow(map_df)
+        plt.show()
         img_array = np.reshape(list(self.map_im.getdata()),(self.map_im.size[1],self.map_im.size[0]))
         up_thresh = self.map_df.occupied_thresh[0]*255
         low_thresh = self.map_df.free_thresh[0]*255
@@ -65,6 +68,8 @@ class Map():
                     img_array[i,j] = 255
                 else:
                     img_array[i,j] = 0
+        plt.imshow(self.map_im)
+        plt.show
         return img_array
 class Map_Node():
     def __init__(self,name):
@@ -191,11 +196,10 @@ class AStar():
         path.reverse()
         return path,dist
 class MapProcessor():
-    def __init__(self,map_in):
-        map_in[map_in == -1] = 50
-        self.map = map_in # black and white array of obstacles and open space
-        self.inf_map_img_array = np.zeros(self.map.shape) # zero array the size of the map
-        self.map_graph = Tree("mapper") # idk, make a tree?
+    def __init__(self,name):
+        self.map = Map(name) # black and white array of obstacles and open space
+        self.inf_map_img_array = np.zeros(self.map.image_array.shape) # zero array the size of the map
+        self.map_graph = Tree(name) # idk, make a tree?
 
     def __modify_map_pixel(self,map_array,i,j,value,absolute):
         if( (i >= 0) and
@@ -206,8 +210,6 @@ class MapProcessor():
             if absolute:
                 map_array[i][j] = value
             else:
-                #if map_array[i][j] == 0:
-                    #map_array[i][j] += value
                 map_array[i][j] = max(map_array[i][j], value)
 
     def __inflate_obstacle(self,kernel,map_array,i,j,absolute):
@@ -226,28 +228,30 @@ class MapProcessor():
         # Perform an operation like dilation, such that the small wall found during the mapping process
         # are increased in size, thus forcing a safer path.
         # make a new empty map same size as original
-        thresh = 100
+        thresh = 0
         if reinflate:
             thresh = 1
             map_in = self.inf_map_img_array.copy()
-        for i in range(self.map.shape[0]):
-            for j in range(self.map.shape[1]): # for each pixel
+        else:
+            self.inf_map_img_array = np.zeros(self.map.image_array.shape)
+        for i in range(self.map.image_array.shape[0]):
+            for j in range(self.map.image_array.shape[1]): # for each pixel
                 if not reinflate:
-                    if self.map[i][j] == thresh: # if pixel is 100 -> wall?
+                    if self.inf_map_img_array[i][j] == 0: # if pixel is 100 -> wall?
                         self.__inflate_obstacle(kernel,self.inf_map_img_array,i,j,absolute) # expand by kernel
                 else:
-                    if map_in[i][j] == thresh:
+                    if map_in[i][j] == 1:
                         self.__inflate_obstacle(kernel, self.inf_map_img_array, i, j, absolute)
         r = np.max(self.inf_map_img_array)-np.min(self.inf_map_img_array) # max pixel value - min pixel value in inflated map
         if r == 0:
             r = 1
         self.inf_map_img_array = (self.inf_map_img_array - np.min(self.inf_map_img_array))/r # normalize values [0-1]
-        # self.inf_map_img_array = np.flipud(self.inf_map_img_array)
+        self.inf_map_img_array = np.flipud(self.inf_map_img_array)
 
     def get_graph_from_map(self):
         # Create the nodes that will be part of the graph, considering only valid nodes or the free space
-        for i in range(self.map.shape[0]):
-            for j in range(self.map.shape[1]):
+        for i in range(self.map.image_array.shape[0]):
+            for j in range(self.map.image_array.shape[1]):
                 if self.inf_map_img_array[i][j] < 1:
                     node = Map_Node('%d,%d'%(i,j))
                     self.map_graph.add_node(node)
@@ -255,8 +259,8 @@ class MapProcessor():
         # Connect the nodes through edges (add children)
         st_eg_w = 1
         di_eg_w = np.sqrt(2)
-        for i in range(self.map.shape[0]):
-            for j in range(self.map.shape[1]):
+        for i in range(self.map.image_array.shape[0]):
+            for j in range(self.map.image_array.shape[1]):
                 # for each newly created node
                 if self.inf_map_img_array[i][j] < 1:
                     if (i > 0):
@@ -264,7 +268,7 @@ class MapProcessor():
                             # add an edge up
                             child_up = self.map_graph.g['%d,%d'%(i-1,j)]
                             self.map_graph.g['%d,%d'%(i,j)].add_children([child_up],[st_eg_w+self.inf_map_img_array[i-1][j]])
-                    if (i < (self.map.shape[0] - 1)):
+                    if (i < (self.map.image_array.shape[0] - 1)):
                         if self.inf_map_img_array[i+1][j] < 1:
                             # add an edge down
                             child_dw = self.map_graph.g['%d,%d'%(i+1,j)]
@@ -274,7 +278,7 @@ class MapProcessor():
                             # add an edge to the left
                             child_lf = self.map_graph.g['%d,%d'%(i,j-1)]
                             self.map_graph.g['%d,%d'%(i,j)].add_children([child_lf],[st_eg_w+self.inf_map_img_array[i][j-1]])
-                    if (j < (self.map.shape[1] - 1)):
+                    if (j < (self.map.image_array.shape[1] - 1)):
                         if self.inf_map_img_array[i][j+1] < 1:
                             # add an edge to the right
                             child_rg = self.map_graph.g['%d,%d'%(i,j+1)]
@@ -284,17 +288,17 @@ class MapProcessor():
                             # add an edge up-left
                             child_up_lf = self.map_graph.g['%d,%d'%(i-1,j-1)]
                             self.map_graph.g['%d,%d'%(i,j)].add_children([child_up_lf],[di_eg_w+self.inf_map_img_array[i-1][j-1]])
-                    if ((i > 0) and (j < (self.map.shape[1] - 1))):
+                    if ((i > 0) and (j < (self.map.image_array.shape[1] - 1))):
                         if self.inf_map_img_array[i-1][j+1] < 1:
                             # add an edge up-right
                             child_up_rg = self.map_graph.g['%d,%d'%(i-1,j+1)]
                             self.map_graph.g['%d,%d'%(i,j)].add_children([child_up_rg],[di_eg_w+self.inf_map_img_array[i-1][j+1]])
-                    if ((i < (self.map.shape[0] - 1)) and (j > 0)):
+                    if ((i < (self.map.image_array.shape[0] - 1)) and (j > 0)):
                         if self.inf_map_img_array[i+1][j-1] < 1:
                             # add an edge down-left
                             child_dw_lf = self.map_graph.g['%d,%d'%(i+1,j-1)]
                             self.map_graph.g['%d,%d'%(i,j)].add_children([child_dw_lf],[di_eg_w+self.inf_map_img_array[i+1][j-1]])
-                    if ((i < (self.map.shape[0] - 1)) and (j < (self.map.shape[1] - 1))):
+                    if ((i < (self.map.image_array.shape[0] - 1)) and (j < (self.map.image_array.shape[1] - 1))):
                         if self.inf_map_img_array[i+1][j+1] < 1:
                             # add an edge down-right
                             child_dw_rg = self.map_graph.g['%d,%d'%(i+1,j+1)]
@@ -344,57 +348,350 @@ class Task2(Node):
         self.create_subscription(PoseStamped, '/move_base_simple/goal', self.__goal_pose_cbk, 10)
         self.create_subscription(PoseWithCovarianceStamped, '/amcl_pose', self.__ttbot_pose_cbk, 10)
         self.create_subscription(PointStamped, '/clicked_point', self.__clicked_cbk, 10)
-        self.create_subscription(LaserScan, '/scan', self.laser_cbk, 10)
+        self.create_subscription(LaserScan, '/scan', self.__laser_cbk, 10)
+        self.create_subscription(Odometry, '/odom', self.__odom_cbk, 10)
 
         self.path_pub = self.create_publisher(Path, 'global_plan', 10)
         self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.next_goal_pub = self.create_publisher(PointStamped, 'next_goal',  10)
 
-        # Fill in the initialization member variables that you need
+        self.flags = {
+            "recompute": True,
+            "follow path": False,
+            "path blocked": False,
+        }
+
+        self.map_file_name = os.path.join('maps', 'map')
+        self.load_map_props(self.map_file_name)
+        self.goal_pose = None
+        self.path = None
+        self.ttbot_pose = PoseStamped()
+        self.ttbot_pose.pose.position.x = 0.0
+        self.ttbot_pose.pose.position.y = 0.0
+        self.start_time = 0.0
+        self.path_idx = 0
+        self.odom_pose = copy(self.ttbot_pose.pose)
+        self.odom_pose.orientation.z = 0.0
+        self.odom_pose.orientation.w = 1.0
+        self.avoid_limit = 0.25
+        self.max_speed = 1.0
+        self.max_omega = 1.0
 
     def timer_cb(self):
-        self.get_logger().info('Task2 node is alive.', throttle_duration_sec=1)
+        self.get_logger().info('Task2 node is alive.', throttle_duration_sec=2)
         # Feel free to delete this line, and write your algorithm in this callback function
+        # Wait for goal
+        # Map path
+        # follow path until blocked
+        # localize and place trash can in map
+        # replan
+        # repeat
+        
+        if self.flags['recompute']:
+            self.move_ttbot(0.0, 0.0)
+            self.recompute()
+            return
+        
+        if self.flags['follow path']:
+            self.get_path_idx()
+            current_goal = self.path.poses[self.path_idx] 
+            speed, heading = self.path_follower(self.odom_pose, current_goal)
+            speed, heading = self.avoid(speed, heading)
+            self.move_ttbot(speed, heading)
 
-    # Define function(s) that complete the (automatic) mapping task
-    def __goal_pose_cbk(self, data):
-        self.goal_pose = data
+        if self.flags['path blocked']:
+            self.move_ttbot(0.0, 0.0)
+        
+    def recompute(self):
+        if self.goal_pose == None or self.odom_pose == None:
+            return
+        self.flags['recompute'] = False
+        self.a_star_path_planner(self.odom_pose, self.goal_pose)
+        self.flags['follow path'] = True
+            
+    def move_ttbot(self, speed, heading):
+        cmd_vel = Twist()
+        cmd_vel.linear.x = float(speed)
+        cmd_vel.angular.z = float(heading) # rad/s
+
+        self.cmd_vel_pub.publish(cmd_vel)
+
+    def avoid(self, speed, heading):
+        self.flags['path blocked'] = False
+        if self.laser == None:
+            return 0,0
+        # find index (angle) of closest point
+
+        front_bias = 0.8
+        corner_bias = 1.2
+
+        min_dist = np.inf
+        min_idx = 0
+        for i in range(len(self.laser)):
+            d = self.laser[i]
+            if i < 30:
+                d = d*np.cos(np.deg2rad(i))
+                d *= front_bias
+            elif 30 < i < 60:
+                d *= corner_bias
+            elif 60 < i < 90:
+                d = d*np.sin(np.deg2rad(i))
+            elif i > 330:
+                d = d*np.cos(np.deg2rad(i))
+                d *= front_bias
+            elif 330 > i > 300:
+                d *= corner_bias
+            elif 300 > i > 270:
+                d = -d*np.sin(np.deg2rad(i))
+
+            if d < min_dist:
+                min_dist = d
+                min_idx = i
+
+        if min_dist < self.avoid_limit * 1.2 and (45 < min_idx < 90 or 270 < min_idx < 315):
+            heading = np.sign(min_idx-180) * 0.2
+            speed = max(0.2, 0.1)
+            return speed, heading
+
+        if min_dist > self.avoid_limit or 90 < min_idx < 270:
+            return(speed, heading)
+
+        self.get_logger().info(f'in avoid | s:{speed:.3f}, h:{heading:.3f} d: {min_dist:.3f} a: {min_idx} da: {self.laser[min_idx]}')
+        speed = min(0, speed) # allow it to back up
+        #heading = np.sign(min_idx-180) * 0.2
+        self.flags['path blocked'] = True
+        self.flags['follow path'] = False
+
+        self.move_ttbot(0.0,0.0)
+        #plt.show()
+
+        return speed, heading
+
+    def a_star_path_planner(self, start_pose, end_pose):
+        self.path = Path()
+        self.path.header.frame_id = "map"
         self.get_logger().info(
-            'goal_pose: {:.4f}, {:.4f}'.format(self.goal_pose.pose.position.x, self.goal_pose.pose.position.y))
+            'A* planner.\n> start: {},\n> end: {}'.format(start_pose.position, end_pose.position))
+        self.start_time = self.get_clock().now().nanoseconds*1e-9 #Do not edit this line (required for autograder)
+        self.path.header.stamp.sec=int(self.start_time)
+        self.path.header.stamp.nanosec=0
+        
+        # inflate map and create graph
+        self.mp = MapProcessor(self.map_file_name)
+        kr = self.mp.rect_kernel(8, 1)
+        g_kr = self.mp.gaussian_kernel(12, 3) 
+        self.get_logger().info(f'{kr}\n{g_kr}')
+        self.mp.inflate_map(kr, absolute=True, reinflate=False) 
+        plt.imshow(self.mp.inf_map_img_array)
+        plt.show()
+        self.mp.inflate_map(g_kr,False, True)                     # Inflate boundaries and make binary
+        self.mp.get_graph_from_map() 
+        fig, ax = plt.subplots(dpi=100)
+        plt.imshow(self.mp.inf_map_img_array)
+        plt.show()
+        
+
+        # set start and end of map graph, compute A* and solve
+        self.mp.map_graph.root = self.convert_to_node(start_pose)                # starting point of graph
+        self.mp.map_graph.end = self.convert_to_node(end_pose)                   # end of graph
+        
+        self.get_logger().info(f"goal node: {self.convert_to_node(end_pose)}")
+
+        as_maze = AStar(self.mp.map_graph)                                   # initialize astar with map graph
+        self.get_logger().info('Solving A*')
+
+        try:
+            as_maze.solve(self.mp.map_graph.g[self.mp.map_graph.root], self.mp.map_graph.g[self.mp.map_graph.end])   # get dist and via lists
+        except KeyError:
+            print(f"mp.map_graph.g: {self.mp.map_graph.g}")
+            raise KeyError(self.mp.map_graph.end)
+
+        # reconstruct A* path
+        self.get_logger().info("Reconstructing path")
+        path_as,dist_as = as_maze.reconstruct_path(self.mp.map_graph.g[self.mp.map_graph.root],self.mp.map_graph.g[self.mp.map_graph.end])  # Get list of nodes in shortest path
+        self.get_logger().info("Converting to poses")
+        #self.make_pose_path(path_as, end_pose) # convert list of node tuples to poses
+        self.path.poses = [self.convert_node_to_pose(node) for node in path_as]
+
+        path_arr_as = self.mp.draw_path(path_as)
+        ax.imshow(path_arr_as)
+        plt.xlabel("x")
+        plt.ylabel("y")
+        plt.show()
+        
+        self.path_pub.publish(self.path)
+        return self.path
+    '''
+    def convert_to_node(self, pose_in):
+        if type(pose_in) == tuple:
+            pose_x = pose_in[0]
+            pose_y = pose_in[1]
+        else:
+            pose_x = pose_in.position.x
+            pose_y = pose_in.position.y
+        pose_x = (pose_x - self.map_data['originX']) // self.map_data['resolution']
+        pose_y = (pose_y - self.map_data['originY']) // self.map_data['resolution']
+        return f"{int(pose_y)},{int(pose_x)}"
+    '''
+    
+    def path_follower(self, vehicle_pose, current_goal_pose):
+        """! Path follower.
+        @param  vehicle_pose           PoseStamped object containing the current vehicle pose.
+        @param  current_goal_pose      PoseStamped object containing the current target from the created path. This is different from the global target.
+        @return path                   Path object containing the sequence of waypoints of the created path.
+        """
+        if type(vehicle_pose) == PoseStamped:
+            vehicle_pose = vehicle_pose.pose
+        if type(current_goal_pose) == PoseStamped:
+            current_goal_pose = current_goal_pose.pose
+        if type(self.ttbot_pose) == PoseStamped:
+            ttbot_pose = self.ttbot_pose.pose
+        else:
+            ttbot_pose = self.ttbot_pose
+
+        # heading should point from vehicle posistion to goal position
+        # speed should be based on distance
+
+        x1 = vehicle_pose.position.x
+        x2 = current_goal_pose.position.x
+        y1 = vehicle_pose.position.y
+        y2 = current_goal_pose.position.y
+        theta = np.arctan2(y2-y1, x2-x1)
+
+        # proportional speed control based on distance and heading, closer = slower, pointing wrong = slower
+        k_heading = -0.9
+        k_heading_dist = -.07
+        k_dist = 0.6
+
+        e_heading = np.sign(ttbot_pose.orientation.z)*2*np.arccos(ttbot_pose.orientation.w) - theta
+        if e_heading > 3.1415:
+            e_heading -= 6.283
+        if e_heading < -3.1415:
+            e_heading += 6.283
+        dist = self.calc_pos_dist(current_goal_pose, ttbot_pose)
+
+        #if np.abs(e_heading) > 3.1415/2:
+        #    dist = -dist
+
+        #speed = min(max(dist * k_dist + e_heading * k_heading_dist, -self.max_speed), self.max_speed)
+        speed = min(max(dist * k_dist + e_heading * k_heading_dist, 0), self.max_speed)
+        
+        if np.abs(e_heading) > 3.1415/5:
+            speed = 0
+
+        heading = max(min(e_heading * k_heading, self.max_omega), -self.max_omega) 
+
+
+        #self.get_logger().info('E: {:.4f}, HE {:.4f}, S {:.4f}, H {:.4f}, fo:{}, con{}'.format(
+        #    dist, e_heading, speed, heading, self.flags['follow path'], self.flags['continue straight']
+        #), throttle_duration_sec = 1)
+
+        return speed, heading
+
+    def get_path_idx(self):
+        """! Path follower.
+        @param  path                  Path object containing the sequence of waypoints of the created path.
+        @param  current_goal_pose     PoseStamped object containing the current vehicle position.
+        @return idx                   Position in the path pointing to the next goal pose to follow.
+        """
+        # find first dist(node) > 0.2m from current position
+        self.prev_idx = self.path_idx
+        idx = self.path_idx
+        dist = self.calc_pos_dist(self.path.poses[idx], self.ttbot_pose)
+        #print(f"dist: {dist}")
+        if not self.flags['follow path'] and dist < 0.05:
+            #self.flags['continue straight'] = True
+            self.get_logger().info("Goal reached")
+            return
+        while dist <= 0.2:
+            dist = self.calc_pos_dist(self.path.poses[idx], self.ttbot_pose)
+            idx += 1
+            if idx >= len(self.path.poses):
+                idx -= 1
+                if dist < 0.05:
+                    self.flags['follow path'] = False
+                    self.flags['recompute'] = True
+                    self.goal_pose = None
+                    self.get_logger().info("Goal reached")
+                break
+        self.path_idx = idx
+        if not self.path_idx == self.prev_idx:
+            next_goal = PointStamped()
+            next_goal.point.x = self.path.poses[self.path_idx].pose.position.x
+            next_goal.point.y = self.path.poses[self.path_idx].pose.position.y
+            next_goal.point.z = 0.0
+            next_goal.header.frame_id = 'map'
+            next_goal.header.stamp.sec = 0
+            next_goal.header.stamp.nanosec = 0
+            self.next_goal_pub.publish(next_goal)
+
+    def calc_pos_dist(self, pose, cur_pose):
+        if type(pose) == PoseStamped:
+            pose = pose.pose
+        if type(cur_pose) == PoseStamped:
+            cur_pose = cur_pose.pose
+
+        delta_x = (pose.position.x - cur_pose.position.x)
+        delta_y = (pose.position.y - cur_pose.position.y)
+        return np.sqrt(delta_x ** 2 + delta_y ** 2)
+    
+    def convert_to_node(self, pose_in):
+        pose_x = pose_in.position.x
+        pose_y = pose_in.position.y
+        pose_x = (pose_x - self.map_origin[0]) // self.map_res
+        pose_y = (pose_y - self.map_origin[1]) // self.map_res
+        return f"{int(pose_y)},{int(pose_x)}"
+    def load_map_props(self, map_file_name):
+        cwd = os.getcwd()
+        map_name = os.path.join(cwd, 'src','turtlebot3_gazebo', map_file_name)
+        f = open(map_name + '.yaml', 'r')
+        map_df = pd.json_normalize(yaml.safe_load(f))
+        self.map_res = map_df.resolution[0] #0.05 # meters per pixel (node)
+        self.map_origin = map_df.origin[0] #(-5.4, -6.3) # map origin
+        f.close()
+    def convert_node_to_pose(self, node):
+        pose = PoseStamped()
+        pose.header.stamp.sec=int(self.start_time)
+        pose.header.stamp.nanosec = 0
+        pose.header.frame_id = "map"
+        if type(node) == Map_Node:
+            node = node.name
+        pose.pose.position.y = (float(node.split(',')[0]) * self.map_res) + self.map_origin[1]
+        pose.pose.position.x = (float(node.split(',')[1]) * self.map_res) + self.map_origin[0]
+        
+        return pose
+    def __goal_pose_cbk(self, data):
+        self.goal_pose = data.pose
+        self.get_logger().info(
+            'goal_pose: {:.4f}, {:.4f}'.format(self.goal_pose.position.x, self.goal_pose.position.y))
     def __clicked_cbk(self, data):
         point_x = data.point.x
         point_y = data.point.y
         #point_x = (point_x - self.map_origin[0]) // self.map_res
         #point_y = (point_y - self.map_origin[1]) // self.map_res
 
-        x1 = self.ttbot_pose.pose.position.x
+        x1 = self.ttbot_pose.position.x
         x2 = data.point.x
-        y1 = self.ttbot_pose.pose.position.y
+        y1 = self.ttbot_pose.position.y
         y2 = data.point.y
         theta = (np.arctan2(y2-y1, x2-x1))
 
-        self.get_logger().info(f"{(point_y):.3f},{(point_x):.3f} a: {theta:.3f}, {2*np.arccos(self.ttbot_pose.pose.orientation.w)*np.sign(self.ttbot_pose.pose.orientation.z)}")
+        self.get_logger().info(f"{(point_y):.3f},{(point_x):.3f} a: {theta:.3f}, {2*np.arccos(self.ttbot_pose.orientation.w)*np.sign(self.ttbot_pose.orientation.z)}")
     def __ttbot_pose_cbk(self, data):
-        """! Callback to catch the position of the vehicle.
-        @param  data    PoseWithCovarianceStamped object from amcl.
-        @return None.
-        """
-        # record odom right before reset with amcl
-        self.get_logger().info('Odom pose: {:.4f}, {:.4f}, {:.4f}, {:.4f}'.format(
-                self.odom_pose.position.x, self.odom_pose.position.y,
-                self.odom_pose.orientation.z, self.odom_pose.orientation.w
-            ))
-
-        self.ttbot_pose = data.pose
+        # data = PoseWithCovarianceStamped()
+        self.ttbot_pose = data.pose.pose
         self.odom_pose = copy(data.pose.pose)
         
-        self.get_logger().info(
-            'ttbot_pose: {:.4f}, {:.4f}, {:.4f}, {:.4f}\n'.format(
-                self.ttbot_pose.pose.position.x, self.ttbot_pose.pose.position.y,
-                self.ttbot_pose.pose.orientation.z, self.ttbot_pose.pose.orientation.w,
-                ))
-    def laser_cbk(self, data):
+        #self.get_logger().info(
+        #    'ttbot_pose: {:.4f}, {:.4f}, {:.4f}, {:.4f}\n'.format(
+        #        self.ttbot_pose.position.x, self.ttbot_pose.position.y,
+        #        self.ttbot_pose.orientation.z, self.ttbot_pose.orientation.w,
+        #        ))
+    def __laser_cbk(self, data):
         self.laser = data.ranges
+    def __odom_cbk(self, data):
+        # data = Odometry()
+        self.odom_pose = data.pose.pose
 
 
 def main(args=None):

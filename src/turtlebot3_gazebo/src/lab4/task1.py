@@ -446,11 +446,6 @@ class Task1(Node):
         if not self.flags['first map']:
             return
         
-        if self.flags['tune avoid']:
-            speed, heading = self.avoid(self.cmd_speed, self.cmd_heading)
-            self.move_ttbot(speed, heading)
-            return
-        
         if self.flags['start spin']:
             self.cnt += 1
             command = Twist()
