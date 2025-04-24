@@ -56,20 +56,16 @@ class Map():
         return im, map_df, [xmin,xmax,ymin,ymax]
 
     def __get_obstacle_map(self, map_im, map_df):
-        plt.imshow(map_df)
-        plt.show()
         img_array = np.reshape(list(self.map_im.getdata()),(self.map_im.size[1],self.map_im.size[0]))
         up_thresh = self.map_df.occupied_thresh[0]*255
         low_thresh = self.map_df.free_thresh[0]*255
-
         for j in range(self.map_im.size[0]):
             for i in range(self.map_im.size[1]):
                 if img_array[i,j] > up_thresh:
                     img_array[i,j] = 255
                 else:
                     img_array[i,j] = 0
-        plt.imshow(self.map_im)
-        plt.show
+        img_array = np.flipud(img_array)
         return img_array
 class Map_Node():
     def __init__(self,name):
@@ -212,7 +208,7 @@ class MapProcessor():
             else:
                 map_array[i][j] = max(map_array[i][j], value)
 
-    def __inflate_obstacle(self,kernel,map_array,i,j,absolute):
+    def inflate_obstacle(self,kernel,map_array,i,j,absolute):
         dx = int(kernel.shape[0]//2)
         dy = int(kernel.shape[1]//2)
         if (dx == 0) and (dy == 0): # inflation size is less than 2x2
@@ -222,31 +218,37 @@ class MapProcessor():
                 for l in range(j-dy,j+dy): # for pixels in bounds of kernel centered at obstacle
                     self.__modify_map_pixel(map_array,k,l,kernel[k-i+dx][l-j+dy],absolute)
 
-    def inflate_map(self,kernel, absolute=True, reinflate = False):
+    def inflate_map(self, kernel, absolute=True, reinflate = False):
         #plt.imshow(self.map)
         #plt.show()
         # Perform an operation like dilation, such that the small wall found during the mapping process
         # are increased in size, thus forcing a safer path.
         # make a new empty map same size as original
-        thresh = 0
         if reinflate:
-            thresh = 1
             map_in = self.inf_map_img_array.copy()
         else:
             self.inf_map_img_array = np.zeros(self.map.image_array.shape)
+            #plt.imshow(self.map.image_array)
+            #plt.title("mp.map.image_array")
+            #plt.show()
         for i in range(self.map.image_array.shape[0]):
             for j in range(self.map.image_array.shape[1]): # for each pixel
                 if not reinflate:
-                    if self.inf_map_img_array[i][j] == 0: # if pixel is 100 -> wall?
-                        self.__inflate_obstacle(kernel,self.inf_map_img_array,i,j,absolute) # expand by kernel
+                    if self.map.image_array[i][j] <= 1: # if pixel is 100 -> wall?
+                        self.inflate_obstacle(kernel,self.inf_map_img_array,i,j,absolute) # expand by kernel
                 else:
                     if map_in[i][j] == 1:
-                        self.__inflate_obstacle(kernel, self.inf_map_img_array, i, j, absolute)
+                        self.inflate_obstacle(kernel, self.inf_map_img_array, i, j, absolute)
         r = np.max(self.inf_map_img_array)-np.min(self.inf_map_img_array) # max pixel value - min pixel value in inflated map
         if r == 0:
             r = 1
         self.inf_map_img_array = (self.inf_map_img_array - np.min(self.inf_map_img_array))/r # normalize values [0-1]
-        self.inf_map_img_array = np.flipud(self.inf_map_img_array)
+        #plt.imshow(self.inf_map_img_array)
+        #plt.title("inflated")
+        #plt.show()
+        if not reinflate:
+            ...
+            #self.inf_map_img_array = np.flipud(self.inf_map_img_array)
 
     def get_graph_from_map(self):
         # Create the nodes that will be part of the graph, considering only valid nodes or the free space
@@ -354,11 +356,14 @@ class Task2(Node):
         self.path_pub = self.create_publisher(Path, 'global_plan', 10)
         self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.next_goal_pub = self.create_publisher(PointStamped, 'next_goal',  10)
+        self.target_pub = self.create_publisher(PointStamped, '/target_point', 10)
 
         self.flags = {
             "recompute": True,
             "follow path": False,
             "path blocked": False,
+            "back up": False,
+            "start path": False,
         }
 
         self.map_file_name = os.path.join('maps', 'map')
@@ -373,13 +378,17 @@ class Task2(Node):
         self.odom_pose = copy(self.ttbot_pose.pose)
         self.odom_pose.orientation.z = 0.0
         self.odom_pose.orientation.w = 1.0
-        self.avoid_limit = 0.25
-        self.max_speed = 1.0
+        self.laser_samples = np.zeros((30,2))
+        self.laser_idx = 0
+        self.mp = None
+        self.cntr = 0
+        self.avoid_limit = 0.24
+        self.max_speed = 0.4
         self.max_omega = 1.0
 
     def timer_cb(self):
-        self.get_logger().info('Task2 node is alive.', throttle_duration_sec=2)
-        # Feel free to delete this line, and write your algorithm in this callback function
+        # self.get_logger().info('Task2 node is alive.', throttle_duration_sec=2)
+
         # Wait for goal
         # Map path
         # follow path until blocked
@@ -388,6 +397,7 @@ class Task2(Node):
         # repeat
         
         if self.flags['recompute']:
+            self.path_idx = 0
             self.move_ttbot(0.0, 0.0)
             self.recompute()
             return
@@ -398,17 +408,143 @@ class Task2(Node):
             speed, heading = self.path_follower(self.odom_pose, current_goal)
             speed, heading = self.avoid(speed, heading)
             self.move_ttbot(speed, heading)
+        
+        if self.flags['back up']:
+            self.cntr += 1
+            self.move_ttbot(-0.2, 0.0)
+            if self.cntr > 11:
+                self.move_ttbot(0.0, 0.0)
+                self.flags['back up'] = False
+                self.cntr = 0
+            return
 
         if self.flags['path blocked']:
+            can_pose = self.calculate_can_pose()
+            if can_pose:
+                self.flags['path blocked'] = False
+                self.flags['recompute'] = True
+                self.add_can_to_map(can_pose)
+                #self.add_can_to_map((can_pose[0], can_pose[1]), 1)
+                #self.add_can_to_map(can_pose, 2)
+                #self.add_can_to_map(can_pose, 3)
             self.move_ttbot(0.0, 0.0)
-        
+
     def recompute(self):
         if self.goal_pose == None or self.odom_pose == None:
             return
-        self.flags['recompute'] = False
-        self.a_star_path_planner(self.odom_pose, self.goal_pose)
+
+        try:
+            self.a_star_path_planner(self.odom_pose, self.goal_pose)
+        except KeyError:
+            self.goal_pose == None
+            self.get_logger().info("Start or end pose is in an invalid region")
+            return
         self.flags['follow path'] = True
-            
+        self.flags['start path'] = True
+        self.flags['recompute'] = False
+    
+    def add_can_to_map(self, can_pose, flip = 0):
+        pose_x, pose_y = can_pose
+
+        #self.get_logger().info(f"{pose_x//self.map_res}, {pose_y//self.map_res}, {self.map_origin[0]//self.map_res}, {self.map_origin[1]//self.map_res} --- FIGURE IT OUT")
+
+        if flip == 0:
+            cany = (pose_x - self.map_origin[0]) // self.map_res
+            canx = (pose_y - self.map_origin[1]) // self.map_res
+        elif flip == 1:
+            cany = (pose_x - self.map_origin[0]) // self.map_res
+            canx = (pose_y - self.map_origin[1]) // self.map_res
+        elif flip == 2:
+            canx = (-pose_x - self.map_origin[0]) // self.map_res
+            cany = (-pose_y - self.map_origin[1]) // self.map_res            
+        elif flip == 3:
+            cany = (-pose_x - self.map_origin[0]) // self.map_res
+            canx = (-pose_y - self.map_origin[1]) // self.map_res
+        
+        cany = int(cany)
+        canx = int(canx)
+
+        
+        circle = self.mp.circle_kernel(4)
+
+        # self.get_logger().info(f"{circle}")
+        self.get_logger().info(f"circle center node:({canx}, {cany})")
+        self.mp.inflate_obstacle(circle, self.mp.map.image_array, canx, cany, True)
+        plt.imshow(self.mp.map.image_array)
+        plt.title("Can added to map.image_array")
+        #plt.show()
+
+    def calculate_can_pose(self):
+        asign = 1
+        min_idx = 0
+        min_dist = np.inf
+        for i in range(len(self.laser)):
+            if self.laser[i] < min_dist:
+                min_dist = self.laser[i]
+                min_idx = i
+        m = min_idx
+        if min_idx > 180:
+            min_idx -= 360
+        self.laser_samples[self.laser_idx, 0] = min_idx
+        self.laser_samples[self.laser_idx, 1] = min_dist
+        self.laser_idx += 1
+        #self.get_logger().info(f"idx: {min_idx}, m: {m}, dist: {min_dist}")
+
+        if self.laser_idx >= self.laser_samples.shape[0]:
+            ave = np.mean(self.laser_samples, axis=0)
+            #self.get_logger().info(f"{self.laser_samples}\n{ave}")
+        else:
+            return None
+        if ave[0] > 0:
+            ave[0] += 5
+        else:
+            ave[0] -= 5
+        ave[1] += 0.2
+        angle_min = np.deg2rad(ave[0])
+        
+        if angle_min > np.pi:
+            angle_min -= np.pi*2
+        theta = np.sign(self.odom_pose.orientation.z)*2*np.arccos(self.odom_pose.orientation.w) + angle_min
+        
+
+        x_can=self.odom_pose.position.x + ave[1] * np.cos(theta)
+        y_can=self.odom_pose.position.y + ave[1] * np.sin(theta)
+        self.get_logger().info(f"min_idx: {ave[0]:.1f}, th:{theta:.2f}, th-a:{theta-angle_min:.2f}, ({x_can:.2f}, {y_can:.2f})")
+
+        
+        can = PointStamped()
+        can.header.frame_id = 'map'
+        can.header.stamp = self.get_clock().now().to_msg()
+        can.point.x = float(x_can)
+        can.point.y = float(y_can)
+        self.target_pub.publish(can)
+        self.laser_idx = 0
+        return (x_can, y_can)
+    '''
+    def face_can(self):
+        min_idx = 0
+        min_dist = np.inf
+        for i in range(len(self.laser)):
+            if self.laser[i] < min_dist:
+                min_dist = self.laser[i]
+                min_idx = i
+
+        theta = np.deg2rad(min_idx)
+        e_heading = np.sign(self.odom_pose.orientation.z)*2*np.arccos(self.odom_pose.orientation.w) - theta
+        if e_heading > 3.1415:
+            e_heading -= 6.283
+        if e_heading < -3.1415:
+            e_heading += 6.283
+        if np.abs(e_heading) > 0.03:
+            k_heading = -0.3
+            heading = max(min(e_heading * k_heading, self.max_omega), -self.max_omega)
+            self.get_logger().info(f"h: {heading}, theta:{theta}, e_h:{e_heading}, {self.odom_pose.orientation.z}, {self.odom_pose.orientation.w}", throttle_duration_sec=0.5)
+            self.move_ttbot(0.0, heading)
+        else:
+            self.move_ttbot(0.0, 0.0)
+            self.flags['face can'] = False
+        return min_dist
+    '''
     def move_ttbot(self, speed, heading):
         cmd_vel = Twist()
         cmd_vel.linear.x = float(speed)
@@ -422,8 +558,8 @@ class Task2(Node):
             return 0,0
         # find index (angle) of closest point
 
-        front_bias = 0.8
-        corner_bias = 1.2
+        front_bias = 0.9+0.1
+        corner_bias = 1.5
 
         min_dist = np.inf
         min_idx = 0
@@ -447,12 +583,14 @@ class Task2(Node):
             if d < min_dist:
                 min_dist = d
                 min_idx = i
-
+        '''
         if min_dist < self.avoid_limit * 1.2 and (45 < min_idx < 90 or 270 < min_idx < 315):
+            self.get_logger().info("Veering to avoid\n")
             heading = np.sign(min_idx-180) * 0.2
-            speed = max(0.2, 0.1)
+            speed = 0.2
+            return 0.0,0.0
             return speed, heading
-
+        '''
         if min_dist > self.avoid_limit or 90 < min_idx < 270:
             return(speed, heading)
 
@@ -461,6 +599,7 @@ class Task2(Node):
         #heading = np.sign(min_idx-180) * 0.2
         self.flags['path blocked'] = True
         self.flags['follow path'] = False
+        self.flags['back up'] = True
 
         self.move_ttbot(0.0,0.0)
         #plt.show()
@@ -477,18 +616,18 @@ class Task2(Node):
         self.path.header.stamp.nanosec=0
         
         # inflate map and create graph
-        self.mp = MapProcessor(self.map_file_name)
+        if self.mp == None:
+            self.mp = MapProcessor(self.map_file_name)
+            # self.get_logger().info("\n\n\nNew MP\n\n")
         kr = self.mp.rect_kernel(8, 1)
         g_kr = self.mp.gaussian_kernel(12, 3) 
-        self.get_logger().info(f'{kr}\n{g_kr}')
+        #self.get_logger().info(f'{kr}\n{g_kr}')
         self.mp.inflate_map(kr, absolute=True, reinflate=False) 
-        plt.imshow(self.mp.inf_map_img_array)
-        plt.show()
         self.mp.inflate_map(g_kr,False, True)                     # Inflate boundaries and make binary
         self.mp.get_graph_from_map() 
         fig, ax = plt.subplots(dpi=100)
         plt.imshow(self.mp.inf_map_img_array)
-        plt.show()
+        #plt.show()
         
 
         # set start and end of map graph, compute A* and solve
@@ -515,9 +654,10 @@ class Task2(Node):
 
         path_arr_as = self.mp.draw_path(path_as)
         ax.imshow(path_arr_as)
+        plt.title("Path")
         plt.xlabel("x")
         plt.ylabel("y")
-        plt.show()
+        #plt.show()
         
         self.path_pub.publish(self.path)
         return self.path
@@ -544,10 +684,10 @@ class Task2(Node):
             vehicle_pose = vehicle_pose.pose
         if type(current_goal_pose) == PoseStamped:
             current_goal_pose = current_goal_pose.pose
-        if type(self.ttbot_pose) == PoseStamped:
-            ttbot_pose = self.ttbot_pose.pose
+        if type(self.odom_pose) == PoseStamped:
+            ttbot_pose = self.odom_pose.pose
         else:
-            ttbot_pose = self.ttbot_pose
+            ttbot_pose = self.odom_pose
 
         # heading should point from vehicle posistion to goal position
         # speed should be based on distance
@@ -559,9 +699,9 @@ class Task2(Node):
         theta = np.arctan2(y2-y1, x2-x1)
 
         # proportional speed control based on distance and heading, closer = slower, pointing wrong = slower
-        k_heading = -0.9
-        k_heading_dist = -.07
-        k_dist = 0.6
+        k_heading = -1.1
+        k_heading_dist = -0.1
+        k_dist = 1.0
 
         e_heading = np.sign(ttbot_pose.orientation.z)*2*np.arccos(ttbot_pose.orientation.w) - theta
         if e_heading > 3.1415:
@@ -574,17 +714,21 @@ class Task2(Node):
         #    dist = -dist
 
         #speed = min(max(dist * k_dist + e_heading * k_heading_dist, -self.max_speed), self.max_speed)
-        speed = min(max(dist * k_dist + e_heading * k_heading_dist, 0), self.max_speed)
+        speed = min(max(dist * k_dist + abs(e_heading) * k_heading_dist, 0), self.max_speed)
         
-        if np.abs(e_heading) > 3.1415/5:
-            speed = 0
+        if np.abs(e_heading) > 3.1415/6:
+            speed = 0.0
+
+        if self.flags['start path'] and np.abs(e_heading) > 0.09:
+            speed = 0.0
+        else:
+            self.flags['start path'] = False
 
         heading = max(min(e_heading * k_heading, self.max_omega), -self.max_omega) 
 
 
-        #self.get_logger().info('E: {:.4f}, HE {:.4f}, S {:.4f}, H {:.4f}, fo:{}, con{}'.format(
-        #    dist, e_heading, speed, heading, self.flags['follow path'], self.flags['continue straight']
-        #), throttle_duration_sec = 1)
+        #self.get_logger().info('D: {:.4f}, HE {:.4f}, S {:.4f}, H {:.4f}'.format(
+        #    dist, e_heading, speed, heading), throttle_duration_sec = 1)
 
         return speed, heading
 
@@ -597,24 +741,26 @@ class Task2(Node):
         # find first dist(node) > 0.2m from current position
         self.prev_idx = self.path_idx
         idx = self.path_idx
-        dist = self.calc_pos_dist(self.path.poses[idx], self.ttbot_pose)
+        dist = self.calc_pos_dist(self.path.poses[idx], self.odom_pose)
         #print(f"dist: {dist}")
         if not self.flags['follow path'] and dist < 0.05:
             #self.flags['continue straight'] = True
             self.get_logger().info("Goal reached")
             return
-        while dist <= 0.2:
-            dist = self.calc_pos_dist(self.path.poses[idx], self.ttbot_pose)
+        while dist <= 0.18:
+            dist = self.calc_pos_dist(self.path.poses[idx], self.odom_pose)
             idx += 1
             if idx >= len(self.path.poses):
                 idx -= 1
-                if dist < 0.05:
+                if dist < 0.1:
                     self.flags['follow path'] = False
                     self.flags['recompute'] = True
+                    self.path_idx = 0
                     self.goal_pose = None
                     self.get_logger().info("Goal reached")
                 break
-        self.path_idx = idx
+        if self.flags['follow path']:
+            self.path_idx = idx
         if not self.path_idx == self.prev_idx:
             next_goal = PointStamped()
             next_goal.point.x = self.path.poses[self.path_idx].pose.position.x
@@ -638,9 +784,12 @@ class Task2(Node):
     def convert_to_node(self, pose_in):
         pose_x = pose_in.position.x
         pose_y = pose_in.position.y
+
         pose_x = (pose_x - self.map_origin[0]) // self.map_res
         pose_y = (pose_y - self.map_origin[1]) // self.map_res
+
         return f"{int(pose_y)},{int(pose_x)}"
+    
     def load_map_props(self, map_file_name):
         cwd = os.getcwd()
         map_name = os.path.join(cwd, 'src','turtlebot3_gazebo', map_file_name)
@@ -676,7 +825,7 @@ class Task2(Node):
         y2 = data.point.y
         theta = (np.arctan2(y2-y1, x2-x1))
 
-        self.get_logger().info(f"{(point_y):.3f},{(point_x):.3f} a: {theta:.3f}, {2*np.arccos(self.ttbot_pose.orientation.w)*np.sign(self.ttbot_pose.orientation.z)}")
+        self.get_logger().info(f"{(point_y):.3f},{(point_x):.3f} a: {theta:.3f}, {2*np.arccos(self.odom_pose.orientation.w)*np.sign(self.odom_pose.orientation.z)}")
     def __ttbot_pose_cbk(self, data):
         # data = PoseWithCovarianceStamped()
         self.ttbot_pose = data.pose.pose
