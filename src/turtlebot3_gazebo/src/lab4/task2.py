@@ -382,7 +382,7 @@ class Task2(Node):
         self.laser_idx = 0
         self.mp = None
         self.cntr = 0
-        self.avoid_limit = 0.24
+        self.avoid_limit = 0.25
         self.max_speed = 0.4
         self.max_omega = 1.0
 
@@ -475,7 +475,6 @@ class Task2(Node):
         #plt.show()
 
     def calculate_can_pose(self):
-        asign = 1
         min_idx = 0
         min_dist = np.inf
         for i in range(len(self.laser)):
