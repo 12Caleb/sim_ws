@@ -58,6 +58,8 @@ class Task3(Node):
         self.im_center = (0,0)
         self.color_found = [False, False, False] # RGB
         self.ball_info = [None, None, None] # RGB
+        self.ball_location = [None, None, None]
+        self.wait_color = [0,0,0]
         self.set_goal_list()
         self.flags = {
             'check video':True,
@@ -67,6 +69,8 @@ class Task3(Node):
             'start path': False,
             "path blocked": False,
             "back up": False,
+            "goal reached": False,
+            'localize': False,
         }
         self.check_video_counter = 0
         self.mp = None
@@ -75,8 +79,11 @@ class Task3(Node):
         self.max_speed = 0.4
         self.max_omega = 1.0
 
+        self.tune_file = open('distance_mapping.csv', 'w')
+        self.tune_file.write(f'Area, X in Frame, Bot x, Bot y, Bot z, Bot w, Ball x, Ball y\n')
+
     def timer_cb(self):
-        self.get_logger().info('Task3 node is alive.', throttle_duration_sec=2)
+        #self.get_logger().info('Task3 node is alive.', throttle_duration_sec=2)
         self.check_video_counter += 1
         if self.check_video_counter > 10: # /10 seconds
             self.check_video_counter = 0
@@ -84,20 +91,111 @@ class Task3(Node):
         else:
             self.flags['check video'] = False
 
+        self.locate_ball()
+        self.flags['check video'] = True
+        if self.flags['localize']:
+            self.get_logger().info(f"Localizing", throttle_duration_sec = 1)
+            return
+        
+        
+        # Spin, checking
+        if self.flags['goal reached']:
+            self.get_logger().info("spinning")
+            self.cntr += 1
+            self.move_ttbot(0.0, 1.5)
+            if self.cntr > 30:
+                self.move_ttbot(0.0, 0.0)
+                self.flags['goal reached'] = False
+                self.flags['recompute'] = True
+                self.goal_pose = None
+        
+
         if self.flags['recompute']:
             self.path_idx = 0
             self.move_ttbot(0.0, 0.0)
-            self.recompute()
+            try:
+                self.recompute()
+            except Exception:
+                raise KeyboardInterrupt
             return
         # Go to point, checking along the way
 
+        if self.flags['follow path']:
+            self.get_path_idx()
+            current_goal = self.path.poses[self.path_idx] 
+            speed, heading = self.path_follower(self.odom_pose, current_goal)
+            speed, heading = self.avoid(speed, heading)
+            self.move_ttbot(speed, heading)
 
-        # Spin, checking
+        if self.flags['back up']:
+            self.cntr += 1
+            self.move_ttbot(-0.2, 0.0)
+            if self.cntr > 11:
+                self.move_ttbot(0.0, 0.0)
+                self.flags['back up'] = False
+                self.flags['recompute'] = True
+                self.cntr = 0
+                self.goal_pose = None
+            return
+
+
 
 
         # Place on map
 
     # def calc_ball_pose(self):
+    def locate_ball(self):
+        blue_position = (6.0,-0.7)
+        frame_border = 0.30
+        done = True
+        for c in range(len(self.ball_info)):
+            if not self.color_found[c]:
+                done = False
+            if (not self.color_found[c]) and self.ball_info[c] != None:
+                if self.wait_color[c] > 0:
+                    self.wait_color[c] -= 1
+                    self.flags['localize'] = False
+                    self.get_logger().info("Waiting for a color", throttle_duration_sec=0.8)
+                    return
+                self.flags['localize'] = True
+                x, y, area = self.ball_info[c]
+                # if horizontal position is not near the center of the image, turn toward it
+                if x < self.im_w * frame_border:
+                    self.move_ttbot(0.0, 0.1)
+                    return
+                if x > self.im_w * (1-frame_border):
+                    self.move_ttbot(0.0, -0.1)
+                    return
+                self.move_ttbot(0.0, 0.0)
+                # at this point, the ball is near the middle of the frame
+                self.tune_file.write(f'{area:.2f}, {x}, {self.odom_pose.position.x:.3f}, {self.odom_pose.position.y:.3f}, {self.odom_pose.orientation.z:.3f}, {self.odom_pose.orientation.w:.3f}, {blue_position[0]}, {blue_position[1]}\n')
+                # area = 199062/dist^2 -> dist = sqrt(199062/area)
+                dist = np.sqrt(199062/area)
+                if dist > 5:
+                    self.wait_color[c] = 10
+                    self.flags['localize'] = False
+                    break
+                angle_in_frame = 0.000587*(self.im_center[0] - x)
+                angle_from_robot = np.sign(self.odom_pose.orientation.z)*2*np.arccos(self.odom_pose.orientation.w) + angle_in_frame
+
+                x_ball=self.odom_pose.position.x + dist * np.cos(angle_from_robot)
+                y_ball=self.odom_pose.position.y + dist * np.sin(angle_from_robot)
+
+                ball = PointStamped()
+                ball.header.frame_id = 'map'
+                ball.header.stamp = self.get_clock().now().to_msg()
+                ball.point.x = float(x_ball)
+                ball.point.y = float(y_ball)
+                self.target_pub.publish(ball)
+                self.color_found[c] = True
+                self.ball_location[c] = (x_ball, y_ball)
+                self.flags['localize'] = False
+                self.add_ball_to_map(x_ball, y_ball)
+                self.flags['recompute'] = True
+        
+        if done:
+            self.goal_list = None
+        
 
     def recompute(self):
         if self.goal_pose == None:
@@ -173,9 +271,12 @@ class Task3(Node):
             green_mask = cv2.inRange(hsv, lower_green, upper_green)
 
         if show:
-            cv2.imshow("Red", red_mask)
-            cv2.imshow("Blue", blue_mask)
-            cv2.imshow("Green", green_mask)
+            if not self.color_found[0]:
+                cv2.imshow("Red", red_mask)
+            if not self.color_found[2]:
+                cv2.imshow("Blue", blue_mask)
+            if not self.color_found[1]:
+                cv2.imshow("Green", green_mask)
 
         return (red_mask, green_mask, blue_mask)
 
@@ -183,18 +284,18 @@ class Task3(Node):
         self.goal_list = []
         goals = [
             (-4.4, -4.0),
-            (-4.4, -1.5),
+#            (-4.4, -1.5),
             (-4.2, 2.1),
             (-2.0, 2.9),
             (1.0, 3.0),
             (1.1, -0.5),
-            (6.9, -0.1),
+            #(6.9, -0.1),
             (3.2, 2.0),
             (5.6, 3.5),
             (8.8, 3.3),
             (8.4, -0.1),
-            (8.3, -2.1),
-            (8.3, -5.3)
+#            (8.3, -2.1),
+            (8.3, -3.7)
         ]
         for goal in goals:
             g = Pose()
@@ -219,6 +320,12 @@ class Task3(Node):
 
         if max_a < self.a_min:
             return None
+        
+        perimeter = cv2.arcLength(contours[max_i], True)
+        circularity = 4*np.pi*max_a/perimeter/perimeter
+        if circularity < 0.85:
+            self.get_logger().info(f"Not a circle {circularity}")
+            return None
 
         cx = 0
         cy = 0
@@ -229,11 +336,12 @@ class Task3(Node):
 
         self.get_logger().info(f"A: {max_a}, X: {cx:.2f}, Y: {cy:.2f}", throttle_duration_sec=1)
 
-        color = (120,255,0)
-        dot = cv2.circle(mask.copy(), (int(cx), int(cy)), radius=5, color=color, thickness=-1)
-        dot = cv2.circle(dot, self.im_center, radius=5, color=color, thickness=-1)
+        #color = (120,255,0)
+        #dot = cv2.circle(mask.copy(), (int(cx), int(cy)), radius=5, color=color, thickness=-1)
+        #dot = cv2.circle(dot, self.im_center, radius=5, color=color, thickness=-1)
         #cv2.imshow('mask', dot)
-        self.ball = True
+        #self.ball = True
+
         return (cx, cy, max_a)
 
     def create_marker_array(self, pose_list):
@@ -263,8 +371,8 @@ class Task3(Node):
         self.get_logger().info("\n\nMarker array created\n\n")
         return array
 
-    def add_ball_to_map(self, ball_pose):
-        pose_x, pose_y = ball_pose
+    def add_ball_to_map(self, x, y):
+        pose_x, pose_y = x, y
 
         #self.get_logger().info(f"{pose_x//self.map_res}, {pose_y//self.map_res}, {self.map_origin[0]//self.map_res}, {self.map_origin[1]//self.map_res} --- FIGURE IT OUT")
 
@@ -279,7 +387,7 @@ class Task3(Node):
         self.mp.inflate_obstacle(circle, self.mp.map.image_array, ballx, bally, True)
         plt.imshow(self.mp.map.image_array)
         plt.title("Can added to map.image_array")
-        #plt.show()
+        plt.show()
 
     def path_follower(self, vehicle_pose, current_goal_pose):
         """! Path follower.
@@ -360,7 +468,8 @@ class Task3(Node):
                 idx -= 1
                 if dist < 0.1:
                     self.flags['follow path'] = False
-                    self.flags['recompute'] = True
+                    self.flags['goal reached'] = True
+                    self.cntr = 0
                     self.path_idx = 0
                     self.goal_pose = None
                     self.get_logger().info("Goal reached")
@@ -550,6 +659,7 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
+        task3.tune_file.close()
         task3.destroy_node()
         rclpy.shutdown()
 
