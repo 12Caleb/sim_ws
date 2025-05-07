@@ -13,7 +13,7 @@ from nav_msgs.msg import Path, Odometry
 from sensor_msgs.msg import Image, LaserScan
 from task2 import Map_Node, MapProcessor, AStar
 from visualization_msgs.msg import Marker, MarkerArray
-from geometry_msgs.msg import Twist, PoseStamped, Pose, PoseWithCovarianceStamped, PointStamped
+from geometry_msgs.msg import Twist, PoseStamped, Pose, PoseWithCovarianceStamped, PointStamped, Point
 
 
 # Import other python packages that you think necessary
@@ -38,10 +38,15 @@ class Task3(Node):
         self.next_goal_pub = self.create_publisher(PointStamped, 'next_goal',  10)
         self.target_pub = self.create_publisher(PointStamped, '/target_point', 10)
         self.goal_array_pub = self.create_publisher(MarkerArray, '/frontier', 10)
+        self.red_pub = self.create_publisher(Point, '/red_pos', 10)
+        self.green_pub = self.create_publisher(Point, '/green_pos', 10)
+        self.blue_pub = self.create_publisher(Point, '/blue_pos', 10)
+        self.ball_pubs = [self.red_pub, self.green_pub, self.blue_pub]
 
         self.map_file_name = os.path.join('maps', 'map')
         self.load_map_props(self.map_file_name)
         self.goal_pose = None
+        self.laser = None
         self.path = None
         self.ttbot_pose = PoseStamped()
         self.ttbot_pose.pose.position.x = 0.0
@@ -63,7 +68,7 @@ class Task3(Node):
         self.set_goal_list()
         self.flags = {
             'check video':True,
-            'show masks': True,
+            'show masks': False,
             'recompute':True,
             'follow path': False,
             'start path': False,
@@ -71,6 +76,7 @@ class Task3(Node):
             "back up": False,
             "goal reached": False,
             'localize': False,
+            'inflate': True,
         }
         self.check_video_counter = 0
         self.mp = None
@@ -93,17 +99,16 @@ class Task3(Node):
 
         self.locate_ball()
         self.flags['check video'] = True
-        if self.flags['localize']:
-            self.get_logger().info(f"Localizing", throttle_duration_sec = 1)
+        if self.flags['localize'] and not self.flags['start path']:
+            self.get_logger().info(f"Localizing", throttle_duration_sec = 0.9)
             return
         
         
         # Spin, checking
         if self.flags['goal reached']:
-            self.get_logger().info("spinning")
             self.cntr += 1
             self.move_ttbot(0.0, 1.5)
-            if self.cntr > 30:
+            if self.cntr > 0:
                 self.move_ttbot(0.0, 0.0)
                 self.flags['goal reached'] = False
                 self.flags['recompute'] = True
@@ -120,6 +125,7 @@ class Task3(Node):
             return
         # Go to point, checking along the way
 
+        #self.get_logger().info(f'{self.flags}', throttle_duration_sec = 0.2)
         if self.flags['follow path']:
             self.get_path_idx()
             current_goal = self.path.poses[self.path_idx] 
@@ -138,11 +144,6 @@ class Task3(Node):
                 self.goal_pose = None
             return
 
-
-
-
-        # Place on map
-
     # def calc_ball_pose(self):
     def locate_ball(self):
         blue_position = (6.0,-0.7)
@@ -155,11 +156,20 @@ class Task3(Node):
                 if self.wait_color[c] > 0:
                     self.wait_color[c] -= 1
                     self.flags['localize'] = False
-                    self.get_logger().info("Waiting for a color", throttle_duration_sec=0.8)
+                    self.get_logger().info(f"Waiting for a color {c} | {self.wait_color[c]}", throttle_duration_sec=0.9)
                     return
                 self.flags['localize'] = True
                 x, y, area = self.ball_info[c]
                 # if horizontal position is not near the center of the image, turn toward it
+
+                # at this point, the ball is near the middle of the frame
+                self.tune_file.write(f'{area:.2f}, {x}, {self.odom_pose.position.x:.3f}, {self.odom_pose.position.y:.3f}, {self.odom_pose.orientation.z:.3f}, {self.odom_pose.orientation.w:.3f}, {blue_position[0]}, {blue_position[1]}\n')
+                # area = 199062/dist^2 -> dist = sqrt(199062/area)
+                dist = np.sqrt(199062/area)
+                if dist > 4:
+                    self.wait_color[c] = 10
+                    self.flags['localize'] = False
+                    break
                 if x < self.im_w * frame_border:
                     self.move_ttbot(0.0, 0.1)
                     return
@@ -167,25 +177,22 @@ class Task3(Node):
                     self.move_ttbot(0.0, -0.1)
                     return
                 self.move_ttbot(0.0, 0.0)
-                # at this point, the ball is near the middle of the frame
-                self.tune_file.write(f'{area:.2f}, {x}, {self.odom_pose.position.x:.3f}, {self.odom_pose.position.y:.3f}, {self.odom_pose.orientation.z:.3f}, {self.odom_pose.orientation.w:.3f}, {blue_position[0]}, {blue_position[1]}\n')
-                # area = 199062/dist^2 -> dist = sqrt(199062/area)
-                dist = np.sqrt(199062/area)
-                if dist > 5:
-                    self.wait_color[c] = 10
-                    self.flags['localize'] = False
-                    break
                 angle_in_frame = 0.000587*(self.im_center[0] - x)
                 angle_from_robot = np.sign(self.odom_pose.orientation.z)*2*np.arccos(self.odom_pose.orientation.w) + angle_in_frame
 
                 x_ball=self.odom_pose.position.x + dist * np.cos(angle_from_robot)
                 y_ball=self.odom_pose.position.y + dist * np.sin(angle_from_robot)
 
+                ball_pos = Point()
+                ball_pos.x = float(x_ball)
+                ball_pos.y = float(y_ball)
+                ball_pos.z = 0.0
+                self.ball_pubs[c].publish(ball_pos)
+            
                 ball = PointStamped()
                 ball.header.frame_id = 'map'
                 ball.header.stamp = self.get_clock().now().to_msg()
-                ball.point.x = float(x_ball)
-                ball.point.y = float(y_ball)
+                ball.point = ball_pos
                 self.target_pub.publish(ball)
                 self.color_found[c] = True
                 self.ball_location[c] = (x_ball, y_ball)
@@ -195,6 +202,7 @@ class Task3(Node):
         
         if done:
             self.goal_list = None
+            raise KeyboardInterrupt
         
 
     def recompute(self):
@@ -222,7 +230,7 @@ class Task3(Node):
             
             for c in range(len(self.color_found)):
                 mask = masks[c]
-                if not self.color_found[c]:
+                if not self.color_found[c] and not self.wait_color[c]:
                     self.ball_info[c] = self.find_centroid(mask)
 
         #ball_info = self.find_centroid(red_mask)
@@ -283,19 +291,19 @@ class Task3(Node):
     def set_goal_list(self):
         self.goal_list = []
         goals = [
-            (-4.4, -4.0),
+            (-4.4, 2.1),
 #            (-4.4, -1.5),
-            (-4.2, 2.1),
+            (-4.4, -3.0),
             (-2.0, 2.9),
             (1.0, 3.0),
             (1.1, -0.5),
             #(6.9, -0.1),
-            (3.2, 2.0),
+            (3.2, 3.0),
             (5.6, 3.5),
             (8.8, 3.3),
             (8.4, -0.1),
 #            (8.3, -2.1),
-            (8.3, -3.7)
+            (8.3, -2.7)
         ]
         for goal in goals:
             g = Pose()
@@ -324,7 +332,7 @@ class Task3(Node):
         perimeter = cv2.arcLength(contours[max_i], True)
         circularity = 4*np.pi*max_a/perimeter/perimeter
         if circularity < 0.85:
-            self.get_logger().info(f"Not a circle {circularity}")
+            #self.get_logger().info(f"Not a circle {circularity}")
             return None
 
         cx = 0
@@ -385,9 +393,10 @@ class Task3(Node):
         # self.get_logger().info(f"{circle}")
         self.get_logger().info(f"circle center node:({ballx}, {bally})")
         self.mp.inflate_obstacle(circle, self.mp.map.image_array, ballx, bally, True)
-        plt.imshow(self.mp.map.image_array)
-        plt.title("Can added to map.image_array")
-        plt.show()
+        #plt.imshow(self.mp.map.image_array)
+        #plt.title("Can added to map.image_array")
+        #plt.show()
+        self.flags['inflate'] = True 
 
     def path_follower(self, vehicle_pose, current_goal_pose):
         """! Path follower.
@@ -488,8 +497,8 @@ class Task3(Node):
     def a_star_path_planner(self, start_pose, end_pose):
         self.path = Path()
         self.path.header.frame_id = "map"
-        self.get_logger().info(
-            'A* planner.\n> start: {},\n> end: {}'.format(start_pose.position, end_pose.position))
+        #self.get_logger().info(
+        #    'A* planner.\n> start: {},\n> end: {}'.format(start_pose.position, end_pose.position))
         self.start_time = self.get_clock().now().nanoseconds*1e-9 #Do not edit this line (required for autograder)
         self.path.header.stamp.sec=int(self.start_time)
         self.path.header.stamp.nanosec=0
@@ -498,14 +507,17 @@ class Task3(Node):
         if self.mp == None:
             self.mp = MapProcessor(self.map_file_name)
             # self.get_logger().info("\n\n\nNew MP\n\n")
-        kr = self.mp.rect_kernel(8, 1)
-        g_kr = self.mp.gaussian_kernel(12, 3) 
-        #self.get_logger().info(f'{kr}\n{g_kr}')
-        self.mp.inflate_map(kr, absolute=True, reinflate=False) 
-        self.mp.inflate_map(g_kr,False, True)                     # Inflate boundaries and make binary
-        self.mp.get_graph_from_map() 
-        fig, ax = plt.subplots(dpi=100)
-        plt.imshow(self.mp.inf_map_img_array)
+
+        if self.flags['inflate']:
+            kr = self.mp.rect_kernel(8, 1)
+            g_kr = self.mp.gaussian_kernel(12, 3) 
+            #self.get_logger().info(f'{kr}\n{g_kr}')
+            self.mp.inflate_map(kr, absolute=True, reinflate=False) 
+            self.mp.inflate_map(g_kr,False, True)                     # Inflate boundaries and make binary
+            self.mp.get_graph_from_map() 
+            self.flags['inflate'] = False
+        #fig, ax = plt.subplots(dpi=100)
+        #plt.imshow(self.mp.inf_map_img_array)
         #plt.show()
         
 
@@ -513,7 +525,7 @@ class Task3(Node):
         self.mp.map_graph.root = self.convert_to_node(start_pose)                # starting point of graph
         self.mp.map_graph.end = self.convert_to_node(end_pose)                   # end of graph
         
-        self.get_logger().info(f"goal node: {self.convert_to_node(end_pose)}")
+        #self.get_logger().info(f"goal node: {self.convert_to_node(end_pose)}")
 
         as_maze = AStar(self.mp.map_graph)                                   # initialize astar with map graph
         self.get_logger().info('Solving A*')
@@ -525,17 +537,17 @@ class Task3(Node):
             raise KeyError(self.mp.map_graph.end)
 
         # reconstruct A* path
-        self.get_logger().info("Reconstructing path")
+        #self.get_logger().info("Reconstructing path")
         path_as,dist_as = as_maze.reconstruct_path(self.mp.map_graph.g[self.mp.map_graph.root],self.mp.map_graph.g[self.mp.map_graph.end])  # Get list of nodes in shortest path
-        self.get_logger().info("Converting to poses")
+        #self.get_logger().info("Converting to poses")
         #self.make_pose_path(path_as, end_pose) # convert list of node tuples to poses
         self.path.poses = [self.convert_node_to_pose(node) for node in path_as]
 
         path_arr_as = self.mp.draw_path(path_as)
-        ax.imshow(path_arr_as)
-        plt.title("Path")
-        plt.xlabel("x")
-        plt.ylabel("y")
+        #ax.imshow(path_arr_as)
+        #plt.title("Path")
+        #plt.xlabel("x")
+        #plt.ylabel("y")
         #plt.show()
         
         self.path_pub.publish(self.path)
@@ -579,7 +591,7 @@ class Task3(Node):
     def avoid(self, speed, heading):
         self.flags['path blocked'] = False
         if self.laser == None:
-            return 0,0
+            return 0.0,0.0
         # find index (angle) of closest point
 
         front_bias = 0.9+0.1

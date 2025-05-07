@@ -356,7 +356,7 @@ class Task1(Node):
         self.create_subscription(Twist, '/cmd_vel', self.cmd_cb, 10)
         self.save_client = self.create_client(SaveMap, '/slam_toolbox/save_map')
 
-        self.avoid_limit = 0.25
+        self.avoid_limit = 0.28
         self.map, self.map_data = None, None
         self.laser = None
         self.min_dist = np.inf
@@ -450,7 +450,7 @@ class Task1(Node):
             self.cnt += 1
             command = Twist()
             command.angular.z = 0.6
-            if self.cnt == 110: # 160
+            if self.cnt == 120: # 160
             # if self.spin_cnt == 2:
                 self.flags['start spin'] = False
                 command.angular.z = 0.0
@@ -460,6 +460,19 @@ class Task1(Node):
         
         #self.flags['mapping done'] = True
 
+        if self.flags['backup']:
+            #self.get_logger().info(f"Counter: {self.cnt}")
+            self.cnt += 1
+            self.flags['recompute'] = False
+            if self.cnt < 10:
+                speed = -0.2
+                heading = 0
+                self.move_ttbot(speed, heading)
+                return
+            else:
+                self.flags['backup'] = False
+                self.flags['recompute'] = True
+                self.cnt = 0
 
         if self.flags['recompute']:
             t=True     
@@ -474,11 +487,11 @@ class Task1(Node):
                 t = False
                 target_tuple = self.get_target_frontier()
                 # time.sleep(2)
-                self.get_logger().info(f"Target: {target_tuple[0]:.3f}, {target_tuple[1]:.3f}")
+                #self.get_logger().info(f"Target: {target_tuple[0]:.3f}, {target_tuple[1]:.3f}")
                 try:
                     self.a_star_path_planner(self.ttbot_pose, target_tuple)
                 except KeyError as e:
-                    self.get_logger().info(f"Key Error: {e}, {type(e)}")
+                    # self.get_logger().info(f"Key Error: {e}, {type(e)}")
                     t = True
                     if self.flags['backup']:
                         self.flags['backup'] = True
@@ -516,21 +529,11 @@ class Task1(Node):
                 self.flags['recompute'] = True
                 self.flags['follow path'] = False
 
-        if self.flags['backup']:
-            #self.get_logger().info(f"Counter: {self.cnt}")
-            self.cnt += 1
-            self.flags['recompute'] = False
-            if self.cnt < 12:
-                speed = -0.2
-                heading = 0
-            else:
-                self.flags['backup'] = False
-                self.flags['recompute'] = True
-                self.cnt = 0
+
 
         speed, heading = self.avoid(speed, heading)
-        if self.flags['backup']:
-            self.get_logger().info(f's:{speed:.3f}, h:{heading:.3f}')
+        #if self.flags['backup']:
+            #self.get_logger().info(f's:{speed:.3f}, h:{heading:.3f}')
         self.move_ttbot(speed, heading)
       
         if self.flags['new map']:
@@ -555,13 +558,15 @@ class Task1(Node):
         
         dist_min = np.inf
         target = (np.inf, np.inf)
-        self.get_logger().info(f'Frontier is {len(self.frontier)} long')
+        #self.get_logger().info(f'Frontier is {len(self.frontier)} long')
         for i in range(len(self.frontier)):
             r,c = self.frontier[i]
             r,c = self.node_to_map((r, c))
             if (r, c) not in self.targeted_frontier:
                 dist = np.sqrt((current_position[0]-r)**2 + (current_position[1]-c)**2)
-                if dist < dist_min and dist > 1:
+                if dist < 1.5:
+                    dist += 1.7
+                if dist < dist_min:
                     dist_min = dist
                     target = (r,c)
 
@@ -771,7 +776,7 @@ class Task1(Node):
         if min_dist > self.avoid_limit or 90 < min_idx < 270:
             return(speed, heading)
 
-        self.get_logger().info(f'in avoid | s:{speed:.3f}, h:{heading:.3f} d: {min_dist:.3f} a: {min_idx} da: {self.laser[min_idx]}')
+        #self.get_logger().info(f'in avoid | s:{speed:.3f}, h:{heading:.3f} d: {min_dist:.3f} a: {min_idx} da: {self.laser[min_idx]}')
         speed = min(0, speed) # allow it to back up
         #heading = np.sign(min_idx-180) * 0.2
         self.flags['avoiding'] = True
@@ -866,17 +871,18 @@ class Task1(Node):
                 #plt.show()            
                 
                 self.mp.inflate_map(g_kr,False, True)                     # Inflate boundaries and make binary
-                self.mp.get_graph_from_map() 
+                self.mp.get_graph_from_map()
+                self.flags['new map'] = False 
                 #plt.imshow(self.mp.inf_map_img_array)
                 #plt.show()                     # create nodes for each open pixel and connect adjacent nodes with edges and add to mp.map_graph
         except KeyError as e:
             raise KeyError(f'754: {e}')
 
         if self.convert_to_node(end_pose) not in self.mp.map_graph.g:
-            self.get_logger().info(f'End Pose is in an inflated region: {end_pose}')
+            #self.get_logger().info(f'End Pose is in an inflated region: {end_pose}')
             #plt.imshow(mp.inf_map_img_array)
             #plt.show()
-            #raise KeyError(f'748: {end_pose}')
+            raise KeyError(f'748: {end_pose}')
         if self.convert_to_node(start_pose) not in self.mp.map_graph.g:
             self.get_logger().info(f'Start Pose is in an inflated region: {start_pose}')
             #plt.imshow(mp.inf_map_img_array)
@@ -884,7 +890,7 @@ class Task1(Node):
             self.flags['backup'] = True
             raise KeyError("758")
         
-        fig, ax = plt.subplots(dpi=100)
+        #fig, ax = plt.subplots(dpi=100)
         #plt.imshow(self.mp.inf_map_img_array)
         #plt.show()
 
@@ -896,7 +902,7 @@ class Task1(Node):
             line = 1
             self.mp.map_graph.end = self.convert_to_node(end_pose)                   # end of graph
             line = 2
-            self.get_logger().info(f"goal node: {self.convert_to_node(end_pose)}")
+            #self.get_logger().info(f"goal node: {self.convert_to_node(end_pose)}")
             line = 2
             as_maze = AStar(self.mp.map_graph)                                   # initialize astar with map graph
             #self.get_logger().info('Solving A*')
@@ -906,7 +912,7 @@ class Task1(Node):
             as_maze.solve(self.mp.map_graph.g[self.mp.map_graph.root], self.mp.map_graph.g[self.mp.map_graph.end])   # get dist and via lists
         except KeyError as e:
             #print(f"mp.map_graph.g: {mp.map_graph.g}")
-            self.get_logger().info(f'End Pose is in an inflate region: {end_pose}')
+            #self.get_logger().info(f'End Pose is in an inflate region: {end_pose}')
             #plt.imshow(mp.inf_map_img_array)
             #plt.show()
             raise KeyError(f'770: {self.mp.map_graph.end}, {e}')
@@ -920,8 +926,8 @@ class Task1(Node):
 
             path_arr_as = self.mp.draw_path(path_as)
             #ax.imshow(path_arr_as)
-            plt.xlabel("x")
-            plt.ylabel("y")
+            #plt.xlabel("x")
+            #plt.ylabel("y")
             self.move_ttbot(0.0,0.0)
             #plt.show()
             

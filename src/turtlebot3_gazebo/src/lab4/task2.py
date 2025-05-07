@@ -382,7 +382,7 @@ class Task2(Node):
         self.laser_idx = 0
         self.mp = None
         self.cntr = 0
-        self.avoid_limit = 0.25
+        self.avoid_limit = 0.23
         self.max_speed = 0.4
         self.max_omega = 1.0
 
@@ -412,7 +412,7 @@ class Task2(Node):
         if self.flags['back up']:
             self.cntr += 1
             self.move_ttbot(-0.2, 0.0)
-            if self.cntr > 11:
+            if self.cntr > 12:
                 self.move_ttbot(0.0, 0.0)
                 self.flags['back up'] = False
                 self.cntr = 0
@@ -424,9 +424,6 @@ class Task2(Node):
                 self.flags['path blocked'] = False
                 self.flags['recompute'] = True
                 self.add_can_to_map(can_pose)
-                #self.add_can_to_map((can_pose[0], can_pose[1]), 1)
-                #self.add_can_to_map(can_pose, 2)
-                #self.add_can_to_map(can_pose, 3)
             self.move_ttbot(0.0, 0.0)
 
     def recompute(self):
@@ -465,7 +462,7 @@ class Task2(Node):
         canx = int(canx)
 
         
-        circle = self.mp.circle_kernel(4)
+        circle = self.mp.circle_kernel(5)
 
         # self.get_logger().info(f"{circle}")
         self.get_logger().info(f"circle center node:({canx}, {cany})")
@@ -557,8 +554,8 @@ class Task2(Node):
             return 0,0
         # find index (angle) of closest point
 
-        front_bias = 0.9+0.1
-        corner_bias = 1.5
+        front_bias = 0.9
+        corner_bias = 1.4
 
         min_dist = np.inf
         min_idx = 0
